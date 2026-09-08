@@ -2,163 +2,690 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    />
+
+    <meta
+      name="theme-color"
+      content="#fff7fb"
+    />
+
+    <meta
+      name="description"
+      content="Paper Daily - 自动追踪与你研究方向相关的最新论文"
+    />
+
     <title>Paper Daily</title>
-    <link rel="stylesheet" href="./styles.css?v=20260530-split-sources" />
+
+    <!--
+      修改版本号用于避免 GitHub Pages / 浏览器继续读取旧 CSS。
+    -->
+    <link
+      rel="stylesheet"
+      href="./styles.css?v=20260908-pink-v1"
+    />
   </head>
-  <body>
+
+  <body data-theme="pink">
+
+    <!-- =====================================================
+         Top Navigation
+         ===================================================== -->
+
     <header class="topbar">
+
+      <!-- Brand -->
       <div class="brand">
-        <span class="brand-mark">PD</span>
-        <div>
-          <h1>Paper Daily</h1>
-          <p id="updatedAt">正在读取数据</p>
+
+        <span
+          class="brand-mark"
+          aria-hidden="true"
+        >
+          PD
+        </span>
+
+        <div class="brand-text">
+
+          <h1>
+            Paper Daily
+          </h1>
+
+          <p id="updatedAt">
+            正在读取数据
+          </p>
+
         </div>
+
       </div>
-      <nav class="top-actions" aria-label="页面操作">
-        <div class="theme-switcher" role="radiogroup" aria-label="选择网站背景主题">
-          <button class="theme-option" type="button" role="radio" aria-checked="true" data-theme-option="dark" title="深色主题">
-            <span class="theme-swatch dark-swatch"></span>
-            <span>深色</span>
+
+
+      <!-- Actions -->
+      <nav
+        class="top-actions"
+        aria-label="页面操作"
+      >
+
+        <!-- ===============================================
+             Theme Switcher
+             =============================================== -->
+
+        <div
+          class="theme-switcher"
+          role="radiogroup"
+          aria-label="选择网站背景主题"
+        >
+
+          <!-- Pink -->
+          <button
+            class="theme-option active"
+            type="button"
+            role="radio"
+            aria-checked="true"
+            data-theme-option="pink"
+            title="粉白主题"
+          >
+            <span
+              class="theme-swatch pink-swatch"
+              aria-hidden="true"
+            ></span>
+
+            <span>
+              粉白
+            </span>
           </button>
-          <button class="theme-option" type="button" role="radio" aria-checked="false" data-theme-option="light" title="淡色主题">
-            <span class="theme-swatch light-swatch"></span>
-            <span>淡色</span>
+
+
+          <!-- Light -->
+          <button
+            class="theme-option"
+            type="button"
+            role="radio"
+            aria-checked="false"
+            data-theme-option="light"
+            title="淡色主题"
+          >
+            <span
+              class="theme-swatch light-swatch"
+              aria-hidden="true"
+            ></span>
+
+            <span>
+              淡色
+            </span>
           </button>
-          <button class="theme-option" type="button" role="radio" aria-checked="false" data-theme-option="eye" title="护眼主题">
-            <span class="theme-swatch eye-swatch"></span>
-            <span>护眼</span>
+
+
+          <!-- Dark -->
+          <button
+            class="theme-option"
+            type="button"
+            role="radio"
+            aria-checked="false"
+            data-theme-option="dark"
+            title="深色主题"
+          >
+            <span
+              class="theme-swatch dark-swatch"
+              aria-hidden="true"
+            ></span>
+
+            <span>
+              深色
+            </span>
           </button>
+
+
+          <!-- Eye Care -->
+          <button
+            class="theme-option"
+            type="button"
+            role="radio"
+            aria-checked="false"
+            data-theme-option="eye"
+            title="护眼主题"
+          >
+            <span
+              class="theme-swatch eye-swatch"
+              aria-hidden="true"
+            ></span>
+
+            <span>
+              护眼
+            </span>
+          </button>
+
         </div>
-        <a class="icon-link" href="https://github.com/Futuresxy/paper-daily/issues" target="_blank" rel="noreferrer" title="配置研究方向">⚙</a>
-        <a class="icon-link" href="https://github.com/Futuresxy/paper-daily/actions" target="_blank" rel="noreferrer" title="查看更新任务">↻</a>
+
+
+        <!-- Research Interests -->
+        <a
+          class="icon-link"
+          href="https://github.com/Coder-jzq/paper-daily/issues"
+          target="_blank"
+          rel="noreferrer"
+          title="配置研究方向"
+          aria-label="配置研究方向"
+        >
+          ⚙
+        </a>
+
+
+        <!-- GitHub Actions -->
+        <a
+          class="icon-link"
+          href="https://github.com/Coder-jzq/paper-daily/actions"
+          target="_blank"
+          rel="noreferrer"
+          title="查看更新任务"
+          aria-label="查看更新任务"
+        >
+          ↻
+        </a>
+
       </nav>
+
     </header>
 
+
+    <!-- =====================================================
+         Main
+         ===================================================== -->
+
     <main class="shell">
-      <section class="overview" aria-label="概览">
+
+
+      <!-- ===================================================
+           Overview
+           =================================================== -->
+
+      <section
+        class="overview"
+        aria-label="概览"
+      >
+
+        <!-- Main Overview Card -->
         <div class="overview-title">
-          <p>Research Radar</p>
-          <h2 id="viewTitle">最新论文</h2>
+
+          <p>
+            Research Radar
+          </p>
+
+          <h2 id="viewTitle">
+            最新论文
+          </h2>
+
         </div>
+
+
+        <!-- Statistics -->
         <div class="metric-grid">
+
+
+          <!-- Total Papers -->
           <div class="metric">
-            <span class="metric-value" id="paperCount">0</span>
-            <span class="metric-label">总论文</span>
+
+            <span
+              class="metric-value"
+              id="paperCount"
+            >
+              0
+            </span>
+
+            <span class="metric-label">
+              总论文
+            </span>
+
           </div>
+
+
+          <!-- Weekly -->
           <div class="metric">
-            <span class="metric-value" id="weekCount">0</span>
-            <span class="metric-label">本周新增</span>
+
+            <span
+              class="metric-value"
+              id="weekCount"
+            >
+              0
+            </span>
+
+            <span class="metric-label">
+              本周新增
+            </span>
+
           </div>
+
+
+          <!-- Monthly -->
           <div class="metric">
-            <span class="metric-value" id="monthCount">0</span>
-            <span class="metric-label">本月新增</span>
+
+            <span
+              class="metric-value"
+              id="monthCount"
+            >
+              0
+            </span>
+
+            <span class="metric-label">
+              本月新增
+            </span>
+
           </div>
+
+
+          <!-- Highest Match -->
           <div class="metric accent">
-            <span class="metric-value" id="topScore">0.00</span>
-            <span class="metric-label">最高匹配</span>
+
+            <span
+              class="metric-value"
+              id="topScore"
+            >
+              0.00
+            </span>
+
+            <span class="metric-label">
+              最高匹配
+            </span>
+
           </div>
+
         </div>
+
       </section>
 
-      <section class="toolbar" aria-label="筛选">
-        <div class="collection-tabs" role="tablist" aria-label="论文集合">
-          <button class="collection-tab active" type="button" data-collection="daily">每日新论文</button>
-          <button class="collection-tab" type="button" data-collection="conference">顶会精品</button>
+
+      <!-- ===================================================
+           Toolbar / Filter
+           =================================================== -->
+
+      <section
+        class="toolbar"
+        aria-label="筛选"
+      >
+
+
+        <!-- Collection -->
+        <div
+          class="collection-tabs"
+          role="tablist"
+          aria-label="论文集合"
+        >
+
+          <button
+            class="collection-tab active"
+            type="button"
+            data-collection="daily"
+          >
+            每日新论文
+          </button>
+
+          <button
+            class="collection-tab"
+            type="button"
+            data-collection="conference"
+          >
+            顶会精品
+          </button>
+
         </div>
-        <div class="tabs" role="tablist" aria-label="视图">
-          <button class="tab" type="button" data-view="all">全部</button>
-          <button class="tab active" type="button" data-view="daily">当日</button>
-          <button class="tab" type="button" data-view="week">本周</button>
-          <button class="tab" type="button" data-view="month">本月</button>
-          <button class="tab" type="button" data-view="highlights">本周精选</button>
+
+
+        <!-- Time View -->
+        <div
+          class="tabs"
+          role="tablist"
+          aria-label="视图"
+        >
+
+          <button
+            class="tab"
+            type="button"
+            data-view="all"
+          >
+            全部
+          </button>
+
+          <button
+            class="tab active"
+            type="button"
+            data-view="daily"
+          >
+            当日
+          </button>
+
+          <button
+            class="tab"
+            type="button"
+            data-view="week"
+          >
+            本周
+          </button>
+
+          <button
+            class="tab"
+            type="button"
+            data-view="month"
+          >
+            本月
+          </button>
+
+          <button
+            class="tab"
+            type="button"
+            data-view="highlights"
+          >
+            本周精选
+          </button>
+
         </div>
+
+
+        <!-- Filters -->
         <div class="filters">
+
+
+          <!-- Date -->
           <label class="field compact">
-            <span>日期</span>
-            <select id="dateFilter"></select>
+
+            <span>
+              日期
+            </span>
+
+            <select
+              id="dateFilter"
+              aria-label="选择日期"
+            ></select>
+
           </label>
+
+
+          <!-- Topic -->
           <label class="field">
-            <span>方向</span>
-            <select id="topicFilter"></select>
+
+            <span>
+              方向
+            </span>
+
+            <select
+              id="topicFilter"
+              aria-label="选择研究方向"
+            ></select>
+
           </label>
+
+
+          <!-- Match Level -->
           <label class="field">
-            <span>匹配</span>
-            <select id="levelFilter">
-              <option value="all">全部</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
+
+            <span>
+              匹配
+            </span>
+
+            <select
+              id="levelFilter"
+              aria-label="选择匹配程度"
+            >
+
+              <option value="all">
+                全部
+              </option>
+
+              <option value="high">
+                High
+              </option>
+
+              <option value="medium">
+                Medium
+              </option>
+
+              <option value="low">
+                Low
+              </option>
+
             </select>
+
           </label>
+
+
+          <!-- Search -->
           <label class="field search">
-            <span>搜索</span>
-            <input id="searchInput" type="search" placeholder="标题、作者、关键词" />
+
+            <span>
+              搜索
+            </span>
+
+            <input
+              id="searchInput"
+              type="search"
+              placeholder="标题、作者、关键词"
+              autocomplete="off"
+              aria-label="搜索论文"
+            />
+
           </label>
+
         </div>
+
       </section>
+
+
+      <!-- ===================================================
+           Content
+           =================================================== -->
 
       <section class="content">
+
+
+        <!-- Content Header -->
         <div class="content-head">
+
           <div>
-            <h2 id="listTitle">当日论文</h2>
-            <p id="scopeLabel">-</p>
+
+            <h2 id="listTitle">
+              当日论文
+            </h2>
+
+            <p id="scopeLabel">
+              -
+            </p>
+
           </div>
-          <span id="resultCount">0 篇</span>
+
+
+          <span
+            id="resultCount"
+            class="result-count"
+          >
+            0 篇
+          </span>
+
         </div>
-        <div id="paperList" class="paper-list"></div>
+
+
+        <!-- Paper List -->
+        <div
+          id="paperList"
+          class="paper-list"
+        ></div>
+
       </section>
+
     </main>
 
+
+    <!-- =====================================================
+         Paper Template
+         ===================================================== -->
+
     <template id="paperTemplate">
+
       <article class="paper-card">
+
+
+        <!-- Main -->
         <div class="paper-main">
+
+
+          <!-- Metadata -->
           <div class="paper-meta">
+
             <span class="match-badge"></span>
+
             <span class="paper-date"></span>
+
             <span class="paper-source"></span>
+
           </div>
+
+
+          <!-- Title -->
           <h3 class="paper-title"></h3>
+
+
+          <!-- Authors -->
           <p class="paper-authors"></p>
+
+
+          <!-- Tags -->
           <div class="paper-tags"></div>
+
+
+          <!-- =================================================
+               AI Summary
+               ================================================= -->
+
           <dl class="summary-grid">
-            <div>
-              <dt>问题</dt>
+
+
+            <!-- Problem -->
+            <div class="summary-item">
+
+              <dt>
+                问题
+              </dt>
+
               <dd class="summary-problem"></dd>
+
             </div>
-            <div>
-              <dt>方法</dt>
+
+
+            <!-- Method -->
+            <div class="summary-item">
+
+              <dt>
+                方法
+              </dt>
+
               <dd class="summary-method"></dd>
+
             </div>
-            <div>
-              <dt>创新</dt>
+
+
+            <!-- Innovation -->
+            <div class="summary-item">
+
+              <dt>
+                创新
+              </dt>
+
               <dd class="summary-innovation"></dd>
+
             </div>
-            <div>
-              <dt>证据</dt>
+
+
+            <!-- Evidence -->
+            <div class="summary-item">
+
+              <dt>
+                证据
+              </dt>
+
               <dd class="summary-evidence"></dd>
+
             </div>
-            <div>
-              <dt>局限</dt>
+
+
+            <!-- Limitations -->
+            <div class="summary-item">
+
+              <dt>
+                局限
+              </dt>
+
               <dd class="summary-limitations"></dd>
+
             </div>
-            <div>
-              <dt>匹配</dt>
+
+
+            <!-- Relevance -->
+            <div class="summary-item">
+
+              <dt>
+                匹配
+              </dt>
+
               <dd class="summary-relevant"></dd>
+
             </div>
+
           </dl>
+
         </div>
+
+
+        <!-- =================================================
+             Footer
+             ================================================= -->
+
         <footer class="paper-footer">
+
+
+          <!-- Match Reason -->
           <span class="match-reason"></span>
+
+
+          <!-- Links -->
           <div class="paper-links">
-            <a class="paper-link abs-link" target="_blank" rel="noreferrer">原文</a>
-            <a class="paper-link pdf-link" target="_blank" rel="noreferrer">PDF</a>
-            <a class="paper-link download-link">下载 PDF</a>
+
+            <a
+              class="paper-link abs-link"
+              target="_blank"
+              rel="noreferrer"
+            >
+              原文
+            </a>
+
+            <a
+              class="paper-link pdf-link"
+              target="_blank"
+              rel="noreferrer"
+            >
+              PDF
+            </a>
+
+            <a
+              class="paper-link download-link"
+            >
+              下载 PDF
+            </a>
+
           </div>
+
         </footer>
+
       </article>
+
     </template>
 
-    <script src="./app.js?v=20260530-split-sources"></script>
+
+    <!--
+      修改版本号用于避免 GitHub Pages / 浏览器读取旧 JS。
+    -->
+    <script
+      src="./app.js?v=20260908-pink-v1"
+    ></script>
+
   </body>
 </html>
