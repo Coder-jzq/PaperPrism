@@ -1,3 +1,5 @@
 # The collector intentionally uses only the Python standard library.
 # Keep this file so GitHub Actions and local setup have a stable place for
 # future optional dependencies.
+# PDF parsing and model-figure extraction
+PyMuPDF>=1.24.0,<2.0.0
