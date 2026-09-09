@@ -3,20 +3,30 @@ name: Paper Daily
 on:
   push:
     branches: [main]
+
   schedule:
+    # GitHub Actions cron 使用 UTC
+    # UTC 22:00 = 北京时间次日 06:00
     - cron: "0 22 * * *"
+
   workflow_dispatch:
     inputs:
       lookback_days:
         description: "首次初始化要回看最近几天的论文"
         required: false
         default: "7"
+
       clear_cache:
         description: "是否清空历史缓存后重新生成论文列表"
         required: false
         default: "false"
+
   issues:
-    types: [opened, edited, reopened]
+    types:
+      - opened
+      - edited
+      - reopened
+
 
 permissions:
   contents: read
@@ -24,119 +34,445 @@ permissions:
   id-token: write
   issues: read
 
+
+# 同一时间只保留最新一次部署任务。
+# 连续修改多个文件时，旧任务会被自动取消，
+# 避免像之前一样排队运行多个过时版本。
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: paper-daily-pages
+  cancel-in-progress: true
+
 
 jobs:
+
   collect-and-deploy:
-    if: github.event_name != 'issues' || github.event.issue.title == 'Research Interests'
+
+    if: >
+      github.event_name != 'issues' ||
+      github.event.issue.title == 'Research Interests'
+
     runs-on: ubuntu-latest
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
+
     steps:
+
+      # =========================================================
+      # 1. Checkout
+      # =========================================================
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
+
+
+      # =========================================================
+      # 2. Python
+      # =========================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+
+      # =========================================================
+      # 3. Install dependencies
+      #
+      # requirements.txt currently includes PyMuPDF,
+      # which is used for PDF parsing and model figure extraction.
+      # =========================================================
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+
+      # =========================================================
+      # 4. Restore historical cache
+      #
+      # Cache contains:
+      #
+      # .paper-cache/
+      # ├── papers.json
+      # ├── conference_papers.json
+      # └── figures/
+      #
+      # =========================================================
+
       - name: Restore paper data cache
         uses: actions/cache/restore@v4
         with:
           path: .paper-cache
           key: paper-data-${{ github.run_id }}-${{ github.run_attempt }}
+
           restore-keys: |
             paper-data-
+
+
+      # =========================================================
+      # 5. Hydrate cached data
+      #
+      # Restore JSON + previously extracted model figures
+      # into web/data before collecting new papers.
+      # =========================================================
 
       - name: Hydrate cached paper data
         run: |
           mkdir -p web/data
+          mkdir -p web/data/figures
+
           if [ -f .paper-cache/papers.json ]; then
             cp .paper-cache/papers.json web/data/papers.json
           fi
+
           if [ -f .paper-cache/conference_papers.json ]; then
             cp .paper-cache/conference_papers.json web/data/conference_papers.json
           fi
 
+          if [ -d .paper-cache/figures ]; then
+            cp -a .paper-cache/figures/. web/data/figures/
+          fi
+
+          echo "Hydrated cached paper data."
+
+          if [ -d web/data/figures ]; then
+            echo "Existing model figures:"
+            find web/data/figures -maxdepth 1 -type f | wc -l
+          fi
+
+
+      # =========================================================
+      # 6. Collect papers
+      # =========================================================
+
       - name: Collect papers
+
         env:
+
+          # -----------------------------------------------------
+          # GitHub
+          # -----------------------------------------------------
+
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
           CONFIG_ISSUE_TITLE: Research Interests
+
+
+          # -----------------------------------------------------
+          # Collection window
+          # -----------------------------------------------------
+
           LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || vars.LOOKBACK_DAYS || '1' }}
-          MAX_PER_TOPIC: ${{ vars.MAX_PER_TOPIC || '10' }}
-          MAX_SUMMARIES: ${{ vars.MAX_SUMMARIES || '20' }}
-          MAX_NEW_PAPERS: ${{ vars.MAX_NEW_PAPERS || '50' }}
-          MAX_STORED_PAPERS: ${{ vars.MAX_STORED_PAPERS || '50' }}
-          MAX_NEW_CONFERENCE_PAPERS: ${{ vars.MAX_NEW_CONFERENCE_PAPERS || '50' }}
-          MAX_STORED_CONFERENCE_PAPERS: ${{ vars.MAX_STORED_CONFERENCE_PAPERS || '300' }}
-          MAX_DATA_BYTES: ${{ vars.MAX_DATA_BYTES || '8388608' }}
-          RECENT_HISTORY_DAYS: ${{ vars.RECENT_HISTORY_DAYS || '45' }}
-          PAPER_SOURCES: ${{ vars.PAPER_SOURCES || '' }}
-          CONTACT_EMAIL: ${{ vars.CONTACT_EMAIL || '' }}
-          CROSSREF_EMAIL: ${{ vars.CROSSREF_EMAIL || '' }}
-          OPENALEX_EMAIL: ${{ vars.OPENALEX_EMAIL || '' }}
-          SOURCE_DELAY_SECONDS: ${{ vars.SOURCE_DELAY_SECONDS || '3' }}
-          DBLP_DELAY_SECONDS: ${{ vars.DBLP_DELAY_SECONDS || '5' }}
-          DBLP_PATTERN_DELAY_SECONDS: ${{ vars.DBLP_PATTERN_DELAY_SECONDS || '3' }}
-          DBLP_RETRIES: ${{ vars.DBLP_RETRIES || '3' }}
-          MAX_PER_CONFERENCE: ${{ vars.MAX_PER_CONFERENCE || '1000' }}
-          ARXIV_QUERY_MODE: ${{ vars.ARXIV_QUERY_MODE || 'keyword' }}
-          ARXIV_SORT_BY: ${{ vars.ARXIV_SORT_BY || 'lastUpdatedDate' }}
-          ARXIV_EXPAND_CATEGORY_SEARCH: ${{ vars.ARXIV_EXPAND_CATEGORY_SEARCH || 'false' }}
-          ARXIV_CATEGORY_MAX_RESULTS: ${{ vars.ARXIV_CATEGORY_MAX_RESULTS || vars.MAX_PER_TOPIC || '10' }}
-          ARXIV_IN_TOPIC_DELAY_SECONDS: ${{ vars.ARXIV_IN_TOPIC_DELAY_SECONDS || '3' }}
-          MIN_DAILY_PAPERS: ${{ vars.MIN_DAILY_PAPERS || '8' }}
-          DAILY_BACKFILL_DAYS: ${{ vars.DAILY_BACKFILL_DAYS || '14' }}
-          MAX_CONFERENCE_ABSTRACT_ENRICHMENTS: ${{ vars.MAX_CONFERENCE_ABSTRACT_ENRICHMENTS || vars.MAX_CONFERENCE_ARXIV_ENRICHMENTS || '50' }}
-          CONFERENCE_ABSTRACT_SOURCES: ${{ vars.CONFERENCE_ABSTRACT_SOURCES || 'arxiv,openalex,crossref' }}
-          CONFERENCE_ABSTRACT_DELAY_SECONDS: ${{ vars.CONFERENCE_ABSTRACT_DELAY_SECONDS || vars.CONFERENCE_ARXIV_DELAY_SECONDS || '3' }}
-          CONFERENCE_ABSTRACT_SEARCH_RESULTS: ${{ vars.CONFERENCE_ABSTRACT_SEARCH_RESULTS || vars.CONFERENCE_ARXIV_SEARCH_RESULTS || '5' }}
-          MAX_CONFERENCE_ARXIV_ENRICHMENTS: ${{ vars.MAX_CONFERENCE_ARXIV_ENRICHMENTS || '50' }}
-          CONFERENCE_ARXIV_DELAY_SECONDS: ${{ vars.CONFERENCE_ARXIV_DELAY_SECONDS || '3' }}
-          CONFERENCE_ARXIV_SEARCH_RESULTS: ${{ vars.CONFERENCE_ARXIV_SEARCH_RESULTS || '5' }}
-          ENABLE_SEMANTIC_SCHOLAR: ${{ vars.ENABLE_SEMANTIC_SCHOLAR || 'false' }}
-          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
-          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
-          CUSTOM_FEED_HEADERS: ${{ secrets.CUSTOM_FEED_HEADERS }}
-          CUSTOM_FEED_BEARER_TOKEN: ${{ secrets.CUSTOM_FEED_BEARER_TOKEN }}
+
           CLEAR_PAPER_CACHE: ${{ github.event_name == 'workflow_dispatch' && inputs.clear_cache || vars.CLEAR_PAPER_CACHE || 'false' }}
+
           INCREMENTAL_SINCE_LAST_RUN: ${{ github.event_name == 'schedule' && 'true' || vars.INCREMENTAL_SINCE_LAST_RUN || 'false' }}
+
+
+          # -----------------------------------------------------
+          # General paper limits
+          # -----------------------------------------------------
+
+          MAX_PER_TOPIC: ${{ vars.MAX_PER_TOPIC || '10' }}
+
+          MAX_NEW_PAPERS: ${{ vars.MAX_NEW_PAPERS || '50' }}
+
+          MAX_STORED_PAPERS: ${{ vars.MAX_STORED_PAPERS || '50' }}
+
+          MAX_NEW_CONFERENCE_PAPERS: ${{ vars.MAX_NEW_CONFERENCE_PAPERS || '50' }}
+
+          MAX_STORED_CONFERENCE_PAPERS: ${{ vars.MAX_STORED_CONFERENCE_PAPERS || '300' }}
+
+          MAX_DATA_BYTES: ${{ vars.MAX_DATA_BYTES || '8388608' }}
+
+          RECENT_HISTORY_DAYS: ${{ vars.RECENT_HISTORY_DAYS || '45' }}
+
+
+          # -----------------------------------------------------
+          # Relevance thresholds
+          # -----------------------------------------------------
+
+          MIN_PAPER_SCORE: ${{ vars.MIN_PAPER_SCORE || '0.08' }}
+
+          MIN_TITLE_ONLY_SCORE: ${{ vars.MIN_TITLE_ONLY_SCORE || '0.18' }}
+
+          MIN_CONFERENCE_SCORE: ${{ vars.MIN_CONFERENCE_SCORE || '0.18' }}
+
+
+          # -----------------------------------------------------
+          # Paper sources
+          # -----------------------------------------------------
+
+          PAPER_SOURCES: ${{ vars.PAPER_SOURCES || '' }}
+
+          CONTACT_EMAIL: ${{ vars.CONTACT_EMAIL || '' }}
+
+          CROSSREF_EMAIL: ${{ vars.CROSSREF_EMAIL || '' }}
+
+          OPENALEX_EMAIL: ${{ vars.OPENALEX_EMAIL || '' }}
+
+          SOURCE_DELAY_SECONDS: ${{ vars.SOURCE_DELAY_SECONDS || '3' }}
+
+
+          # -----------------------------------------------------
+          # arXiv
+          # -----------------------------------------------------
+
+          ARXIV_QUERY_MODE: ${{ vars.ARXIV_QUERY_MODE || 'keyword' }}
+
+          ARXIV_SORT_BY: ${{ vars.ARXIV_SORT_BY || 'lastUpdatedDate' }}
+
+          ARXIV_EXPAND_CATEGORY_SEARCH: ${{ vars.ARXIV_EXPAND_CATEGORY_SEARCH || 'false' }}
+
+          ARXIV_CATEGORY_MAX_RESULTS: ${{ vars.ARXIV_CATEGORY_MAX_RESULTS || vars.MAX_PER_TOPIC || '10' }}
+
+          ARXIV_IN_TOPIC_DELAY_SECONDS: ${{ vars.ARXIV_IN_TOPIC_DELAY_SECONDS || '3' }}
+
+          ARXIV_RETRY_THROTTLED: ${{ vars.ARXIV_RETRY_THROTTLED || 'false' }}
+
+          ARXIV_RETRIES: ${{ vars.ARXIV_RETRIES || '4' }}
+
+          ARXIV_TIMEOUT_SECONDS: ${{ vars.ARXIV_TIMEOUT_SECONDS || '90' }}
+
+
+          # -----------------------------------------------------
+          # Daily backfill
+          # -----------------------------------------------------
+
+          MIN_DAILY_PAPERS: ${{ vars.MIN_DAILY_PAPERS || '8' }}
+
+          DAILY_BACKFILL_DAYS: ${{ vars.DAILY_BACKFILL_DAYS || '14' }}
+
+
+          # -----------------------------------------------------
+          # DBLP conference collection
+          # -----------------------------------------------------
+
+          DBLP_DELAY_SECONDS: ${{ vars.DBLP_DELAY_SECONDS || '5' }}
+
+          DBLP_PATTERN_DELAY_SECONDS: ${{ vars.DBLP_PATTERN_DELAY_SECONDS || '3' }}
+
+          DBLP_RETRIES: ${{ vars.DBLP_RETRIES || '3' }}
+
+          DBLP_TIMEOUT_SECONDS: ${{ vars.DBLP_TIMEOUT_SECONDS || '45' }}
+
+          MAX_PER_CONFERENCE: ${{ vars.MAX_PER_CONFERENCE || '1000' }}
+
+
+          # -----------------------------------------------------
+          # Conference abstract enrichment
+          # -----------------------------------------------------
+
+          MAX_CONFERENCE_ABSTRACT_ENRICHMENTS: ${{ vars.MAX_CONFERENCE_ABSTRACT_ENRICHMENTS || vars.MAX_CONFERENCE_ARXIV_ENRICHMENTS || '50' }}
+
+          CONFERENCE_ABSTRACT_SOURCES: ${{ vars.CONFERENCE_ABSTRACT_SOURCES || 'arxiv,openalex,crossref' }}
+
+          CONFERENCE_ABSTRACT_DELAY_SECONDS: ${{ vars.CONFERENCE_ABSTRACT_DELAY_SECONDS || vars.CONFERENCE_ARXIV_DELAY_SECONDS || '3' }}
+
+          CONFERENCE_ABSTRACT_SEARCH_RESULTS: ${{ vars.CONFERENCE_ABSTRACT_SEARCH_RESULTS || vars.CONFERENCE_ARXIV_SEARCH_RESULTS || '5' }}
+
+          MAX_CONFERENCE_ARXIV_ENRICHMENTS: ${{ vars.MAX_CONFERENCE_ARXIV_ENRICHMENTS || '50' }}
+
+          CONFERENCE_ARXIV_DELAY_SECONDS: ${{ vars.CONFERENCE_ARXIV_DELAY_SECONDS || '3' }}
+
+          CONFERENCE_ARXIV_SEARCH_RESULTS: ${{ vars.CONFERENCE_ARXIV_SEARCH_RESULTS || '5' }}
+
+
+          # -----------------------------------------------------
+          # Optional external sources
+          # -----------------------------------------------------
+
+          ENABLE_SEMANTIC_SCHOLAR: ${{ vars.ENABLE_SEMANTIC_SCHOLAR || 'false' }}
+
+          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+
+          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+
+          CUSTOM_FEED_HEADERS: ${{ secrets.CUSTOM_FEED_HEADERS }}
+
+          CUSTOM_FEED_BEARER_TOKEN: ${{ secrets.CUSTOM_FEED_BEARER_TOKEN }}
+
+
+          # -----------------------------------------------------
+          # LLM
+          #
+          # V3:
+          # Task
+          # Problem
+          # Method
+          # Innovation
+          # Evidence
+          # Limitations
+          # Relevance
+          #
+          # English ↔ Chinese sentence pairs
+          # -----------------------------------------------------
+
+          MAX_SUMMARIES: ${{ vars.MAX_SUMMARIES || '20' }}
+
           LLM_CONCURRENCY: ${{ vars.LLM_CONCURRENCY || '2' }}
+
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL || secrets.LLM_BASE_URL }}
+
           LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
+
+          # 你的 OpenAI-compatible relay 使用 Responses API。
+          # 如果以后需要更改，可以创建 Repository Variable:
+          # LLM_API_MODE
+          LLM_API_MODE: ${{ vars.LLM_API_MODE || 'responses' }}
+
+          LLM_SUMMARIZE_CONFERENCE: ${{ vars.LLM_SUMMARIZE_CONFERENCE || 'true' }}
+
+          LLM_SUMMARIZE_TITLE_ONLY: ${{ vars.LLM_SUMMARIZE_TITLE_ONLY || 'false' }}
+
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/collect_papers.py
+
+
+          # -----------------------------------------------------
+          # V3 Model Figure Extraction
+          #
+          # Only selected papers are processed.
+          # It does NOT download every candidate PDF.
+          # -----------------------------------------------------
+
+          ENABLE_MODEL_FIGURE: ${{ vars.ENABLE_MODEL_FIGURE || 'true' }}
+
+          MAX_MODEL_FIGURES_PER_RUN: ${{ vars.MAX_MODEL_FIGURES_PER_RUN || '20' }}
+
+          PDF_TIMEOUT_SECONDS: ${{ vars.PDF_TIMEOUT_SECONDS || '45' }}
+
+          # 30 MB
+          PDF_MAX_BYTES: ${{ vars.PDF_MAX_BYTES || '31457280' }}
+
+          # Minimum confidence/heuristic score for accepting a
+          # detected architecture/framework figure.
+          MODEL_FIGURE_MIN_SCORE: ${{ vars.MODEL_FIGURE_MIN_SCORE || '0.48' }}
+
+          # Usually the architecture figure is in the first
+          # several pages. Avoid rendering the whole PDF.
+          MODEL_FIGURE_MAX_PAGES: ${{ vars.MODEL_FIGURE_MAX_PAGES || '12' }}
+
+          MODEL_FIGURE_DPI: ${{ vars.MODEL_FIGURE_DPI || '180' }}
+
+          MODEL_FIGURE_DELAY_SECONDS: ${{ vars.MODEL_FIGURE_DELAY_SECONDS || '1' }}
+
+
+        run: |
+          python scripts/collect_papers.py
+
+
+      # =========================================================
+      # 7. Show collection result
+      # =========================================================
+
+      - name: Show generated data
+        if: always()
+        run: |
+          echo "========================================"
+          echo "Paper Daily generated files"
+          echo "========================================"
+
+          if [ -f web/data/papers.json ]; then
+            echo "papers.json:"
+            ls -lh web/data/papers.json
+          else
+            echo "papers.json: missing"
+          fi
+
+          if [ -f web/data/conference_papers.json ]; then
+            echo "conference_papers.json:"
+            ls -lh web/data/conference_papers.json
+          else
+            echo "conference_papers.json: missing"
+          fi
+
+          if [ -d web/data/figures ]; then
+            echo "Model figures:"
+            find web/data/figures -maxdepth 1 -type f | wc -l
+
+            echo "Figure directory size:"
+            du -sh web/data/figures || true
+          else
+            echo "Model figures: 0"
+          fi
+
+
+      # =========================================================
+      # 8. Stage cache
+      #
+      # Copy both JSON files and model figures into cache.
+      # =========================================================
 
       - name: Stage paper data cache
         run: |
           mkdir -p .paper-cache
-          cp web/data/papers.json .paper-cache/papers.json
+
+          if [ -f web/data/papers.json ]; then
+            cp web/data/papers.json .paper-cache/papers.json
+          fi
+
           if [ -f web/data/conference_papers.json ]; then
             cp web/data/conference_papers.json .paper-cache/conference_papers.json
           fi
+
+          rm -rf .paper-cache/figures
+
+          if [ -d web/data/figures ]; then
+            mkdir -p .paper-cache/figures
+            cp -a web/data/figures/. .paper-cache/figures/
+          fi
+
+
+      # =========================================================
+      # 9. Save cache
+      # =========================================================
 
       - name: Save paper data cache
         uses: actions/cache/save@v4
         with:
           path: .paper-cache
+
           key: paper-data-${{ github.run_id }}-${{ github.run_attempt }}
+
+
+      # =========================================================
+      # 10. GitHub Pages
+      # =========================================================
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+
+      # web/ now contains:
+      #
+      # index.html
+      # app.js
+      # styles.css
+      #
+      # data/
+      # ├── papers.json
+      # ├── conference_papers.json
+      # └── figures/
+      #
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: web
+
+
+      # =========================================================
+      # 11. Deploy
+      # =========================================================
 
       - name: Deploy to GitHub Pages
         id: deployment
