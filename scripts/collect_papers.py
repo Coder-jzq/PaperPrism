@@ -1550,35 +1550,220 @@ def should_summarize_paper_with_llm(paper: dict[str, Any]) -> bool:
     return True
 
 
-def fallback_summary(paper: dict[str, Any], best_match: dict[str, Any]) -> dict[str, str]:
-    abstract = paper.get("summary", "")
-    first_sentence = re.split(r"(?<=[.!?])\s+", abstract)[0] if abstract else ""
+BILINGUAL_ANALYSIS_FIELDS = (
+    "problem",
+    "method",
+    "innovation",
+    "evidence",
+    "limitations",
+    "why_relevant",
+)
+
+
+def analysis_pair(original: str = "", zh: str = "") -> dict[str, str]:
+    return {
+        "original": normalize_space(str(original or "")),
+        "zh": normalize_space(str(zh or "")),
+    }
+
+
+def normalize_analysis_pair(value: Any) -> dict[str, str] | None:
+    if isinstance(value, dict):
+        original = (
+            value.get("original")
+            or value.get("en")
+            or value.get("english")
+            or value.get("source")
+            or ""
+        )
+        zh = (
+            value.get("zh")
+            or value.get("cn")
+            or value.get("chinese")
+            or value.get("translation")
+            or ""
+        )
+        pair = analysis_pair(str(original or ""), str(zh or ""))
+        if pair["original"] or pair["zh"]:
+            return pair
+        return None
+
+    if isinstance(value, str) and value.strip():
+        # Compatibility with an older model response that returned a Chinese string.
+        return analysis_pair("", value)
+
+    return None
+
+
+def normalize_analysis_pair_list(
+    value: Any,
+    fallback: list[dict[str, str]] | None = None,
+    max_items: int = 4,
+) -> list[dict[str, str]]:
+    raw_items = ensure_list(value)
+    pairs: list[dict[str, str]] = []
+    for raw_item in raw_items:
+        pair = normalize_analysis_pair(raw_item)
+        if not pair:
+            continue
+        pairs.append(pair)
+        if len(pairs) >= max_items:
+            break
+
+    if pairs:
+        return pairs
+
+    return copy.deepcopy(fallback or [])
+
+
+def analysis_to_legacy_summary(analysis: dict[str, Any]) -> dict[str, str]:
+    """
+    Convert the new bilingual sentence-pair schema to the historical
+    chinese_summary schema so the old web UI remains usable during migration.
+    """
+    legacy: dict[str, str] = {}
+    for field in BILINGUAL_ANALYSIS_FIELDS:
+        values = normalize_analysis_pair_list(analysis.get(field), max_items=8)
+        chinese = [pair["zh"] for pair in values if pair.get("zh")]
+        if not chinese:
+            chinese = [pair["original"] for pair in values if pair.get("original")]
+        legacy[field] = " ".join(chinese).strip()
+    return legacy
+
+
+def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict[str, Any]:
+    title = normalize_space(str(paper.get("title") or ""))
+    reason_zh = normalize_space(str(best_match.get("reason") or "与配置方向存在文本匹配。"))
+
     if paper.get("source_type") == "conference" and not has_meaningful_summary(paper):
         return {
-            "problem": "DBLP 题录没有摘要，且未在外部论文索引中找到足够可靠的同题论文摘要。",
-            "method": "请打开论文链接查看方法和系统设计细节。",
-            "innovation": "仅凭标题无法可靠判断创新点，已避免占用模型翻译额度。",
-            "evidence": "题录信息来自会议索引，技术细节需要在原文中核验。",
-            "limitations": "DBLP 通常不提供摘要；如果 arXiv、Semantic Scholar、OpenAlex 或 Crossref 暂未收录摘要，自动摘要会缺失。",
-            "why_relevant": best_match.get("reason", "与配置方向存在文本匹配。"),
+            "schema_version": 2,
+            "title": analysis_pair(title, ""),
+            "problem": [
+                analysis_pair(
+                    "The conference index does not provide a reliable abstract for this paper.",
+                    "会议索引没有为这篇论文提供可靠摘要。",
+                )
+            ],
+            "method": [
+                analysis_pair(
+                    "Please open the paper page to inspect the method and system details.",
+                    "请打开论文页面查看方法和系统细节。",
+                )
+            ],
+            "innovation": [
+                analysis_pair(
+                    "The innovation cannot be determined reliably from the title alone.",
+                    "仅凭标题无法可靠判断论文的创新点。",
+                )
+            ],
+            "evidence": [
+                analysis_pair(
+                    "Only bibliographic information from the conference index is currently available.",
+                    "当前仅有会议索引提供的题录信息可供核验。",
+                )
+            ],
+            "limitations": [
+                analysis_pair(
+                    "Automatic analysis is limited until an abstract is found from arXiv, OpenAlex, Crossref, or another trusted source.",
+                    "在 arXiv、OpenAlex、Crossref 或其他可信来源找到摘要之前，自动分析能力会受到限制。",
+                )
+            ],
+            "why_relevant": [
+                analysis_pair(
+                    "The paper has a textual match with one of the configured research interests.",
+                    reason_zh,
+                )
+            ],
         }
+
     if not has_meaningful_summary(paper):
         return {
-            "problem": "来源没有提供足够摘要，当前不调用模型做标题猜测。",
-            "method": "请打开论文链接查看方法细节。",
-            "innovation": "标题信息不足，无法可靠提取创新点。",
-            "evidence": "证据不足，需要阅读全文核验。",
-            "limitations": "缺少摘要会降低自动相关性和中文总结质量。",
-            "why_relevant": best_match.get("reason", "与配置方向存在文本匹配。"),
+            "schema_version": 2,
+            "title": analysis_pair(title, ""),
+            "problem": [
+                analysis_pair(
+                    "The source does not provide enough abstract information for a reliable problem summary.",
+                    "来源没有提供足够摘要信息，因此无法可靠概括论文问题。",
+                )
+            ],
+            "method": [
+                analysis_pair(
+                    "Please open the paper page to inspect the method details.",
+                    "请打开论文页面查看方法细节。",
+                )
+            ],
+            "innovation": [
+                analysis_pair(
+                    "The innovation cannot be extracted reliably from the available metadata.",
+                    "现有元数据不足以可靠提取论文创新点。",
+                )
+            ],
+            "evidence": [
+                analysis_pair(
+                    "More evidence is required from the abstract or full paper.",
+                    "需要从摘要或论文全文中获取更多证据。",
+                )
+            ],
+            "limitations": [
+                analysis_pair(
+                    "Missing abstract information reduces the quality of relevance analysis and bilingual summarization.",
+                    "缺少摘要信息会降低相关性分析和双语总结的质量。",
+                )
+            ],
+            "why_relevant": [
+                analysis_pair(
+                    "The paper has a textual match with one of the configured research interests.",
+                    reason_zh,
+                )
+            ],
         }
+
     return {
-        "problem": "未配置模型 API，当前仅基于标题、摘要和关键词生成基础摘要。",
-        "method": first_sentence[:300] if first_sentence else "请打开论文链接查看方法细节。",
-        "innovation": "需要接入模型 API 后自动抽取更精确的中文创新点。",
-        "evidence": "来源摘要可在论文原文中核验。",
-        "limitations": "基础模式不会阅读全文，也不会进行深度技术对比。",
-        "why_relevant": best_match.get("reason", "与配置方向存在文本匹配。"),
+        "schema_version": 2,
+        "title": analysis_pair(title, ""),
+        "problem": [
+            analysis_pair(
+                "The LLM analysis is unavailable, so only a basic metadata-based assessment is shown.",
+                "当前无法使用 LLM 分析，因此仅展示基于元数据的基础判断。",
+            )
+        ],
+        "method": [
+            analysis_pair(
+                "Please refer to the source abstract or paper page for the detailed method.",
+                "请参考来源摘要或论文页面查看详细方法。",
+            )
+        ],
+        "innovation": [
+            analysis_pair(
+                "A precise innovation summary requires the configured LLM analysis.",
+                "精确的创新点总结需要启用已配置的 LLM 分析。",
+            )
+        ],
+        "evidence": [
+            analysis_pair(
+                "The source abstract can be checked against the original paper.",
+                "来源摘要可与论文原文进行核验。",
+            )
+        ],
+        "limitations": [
+            analysis_pair(
+                "The fallback mode does not perform deep technical comparison or sentence-aligned translation.",
+                "基础回退模式不会进行深度技术比较或逐句双语分析。",
+            )
+        ],
+        "why_relevant": [
+            analysis_pair(
+                "The paper has a textual match with one of the configured research interests.",
+                reason_zh,
+            )
+        ],
     }
+
+
+def fallback_summary(paper: dict[str, Any], best_match: dict[str, Any]) -> dict[str, str]:
+    """Legacy Chinese-only summary retained for backward compatibility."""
+    return analysis_to_legacy_summary(fallback_analysis(paper, best_match))
 
 
 def llm_enabled() -> bool:
@@ -1783,81 +1968,174 @@ def call_openai_compatible(prompt: str) -> dict[str, Any]:
 
 
 def build_llm_prompt(topic: Topic, paper: dict[str, Any], base_match: dict[str, Any]) -> str:
-    abstract_label = "摘要/题录信息" if paper.get("source_type") == "conference" else "摘要"
+    abstract_label = "abstract / bibliographic information" if paper.get("source_type") == "conference" else "abstract"
+    paper_title = normalize_space(str(paper.get("title") or ""))
+
     return f"""
-请根据论文标题、摘要、分类和我的研究方向，输出精确中文分析。目标不是逐句翻译，而是综合整篇摘要快速判断这篇论文是否值得阅读。
-要求：
-1. 先识别论文真正解决的问题、核心机制、实验或系统证据，再翻译成自然中文。
-2. 不要夸大摘要中没有的信息；如果证据不足，请明确说明。
-3. 相关性判断要严格，说明它具体匹配哪些关键词、场景或系统瓶颈。
-4. 如果论文只是泛泛相关，请把 match_level 降为 medium 或 low，并在 why_relevant 里说明需要人工复核。
+You are analyzing a research paper for a personal paper-reading dashboard.
 
-我的研究方向：
-名称：{topic.name}
-描述：{topic.description}
-关键词：{", ".join(topic.keywords)}
+Your task is to produce a concise bilingual technical analysis in sentence-aligned English-Chinese pairs.
+The English sentence is the primary technical statement; the Chinese sentence must be its faithful, natural translation.
 
-论文信息：
-标题：{paper.get("title", "")}
-作者：{", ".join(paper.get("authors", [])[:8])}
-arXiv 分类：{", ".join(paper.get("categories", []))}
-{abstract_label}：{paper.get("summary", "")}
+IMPORTANT RULES:
+1. Use ONLY information supported by the supplied title, abstract/bibliographic information, categories, and research-interest context.
+2. Do not invent experiments, datasets, numerical results, model components, causal claims, or conclusions that are not supported.
+3. The title.original field MUST reproduce the supplied paper title exactly. title.zh should be a natural Chinese translation.
+4. For problem, method, innovation, evidence, limitations, and why_relevant:
+   - Return an array of sentence pairs.
+   - Each array element contains exactly one complete English sentence in "original" and its sentence-aligned Chinese translation in "zh".
+   - Do not merge multiple unrelated English sentences into one pair.
+   - Preserve important technical terminology, model names, dataset names, task names, and abbreviations.
+5. The English side should be a faithful technical summary rather than unnecessary verbatim copying. When the abstract gives a precise technical formulation, preserve its terminology.
+6. For limitations, distinguish explicit limitations from cautious inference. If the abstract does not state a limitation, phrase it conservatively, e.g. "The abstract does not report ...".
+7. Keep the analysis compact:
+   - problem: 1-2 sentence pairs
+   - method: 1-3 sentence pairs
+   - innovation: 1-2 sentence pairs
+   - evidence: 1-2 sentence pairs
+   - limitations: 1-2 sentence pairs
+   - why_relevant: 1-2 sentence pairs
+8. Relevance must be strict. If the paper is only broadly related, lower match_level to medium or low.
+9. Output ONLY valid JSON. Do not output Markdown or explanatory text outside JSON.
 
-基础匹配信息：
-分数：{base_match.get("score")}
-等级：{base_match.get("level")}
-原因：{base_match.get("reason")}
+Research interest:
+Name: {topic.name}
+Description: {topic.description}
+Keywords: {", ".join(topic.keywords)}
 
-请输出 JSON，字段必须为：
+Paper:
+Title: {paper_title}
+Authors: {", ".join(paper.get("authors", [])[:8])}
+Categories: {", ".join(paper.get("categories", []))}
+{abstract_label}: {paper.get("summary", "")}
+
+Base relevance:
+Score: {base_match.get("score")}
+Level: {base_match.get("level")}
+Reason: {base_match.get("reason")}
+
+Return JSON with EXACTLY this structure:
 {{
-  "problem": "论文要解决的问题，中文，1-2句，避免空泛背景",
-  "method": "核心方法，中文，2-3句，包含关键技术组件或系统流程",
-  "innovation": "相对已有工作的具体创新点，中文，2-3点合并成一段",
-  "evidence": "摘要中可核验的实验、理论或系统证据；没有则写证据不足",
-  "limitations": "可能局限或需要阅读全文确认的点",
-  "why_relevant": "为什么匹配我的研究方向",
+  "title": {{
+    "original": {json.dumps(paper_title, ensure_ascii=False)},
+    "zh": "中文标题"
+  }},
+  "problem": [
+    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+  ],
+  "method": [
+    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+  ],
+  "innovation": [
+    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+  ],
+  "evidence": [
+    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+  ],
+  "limitations": [
+    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+  ],
+  "why_relevant": [
+    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+  ],
   "match_score_adjustment": 0.0,
   "match_level": "high|medium|low"
 }}
 """.strip()
 
 
-def summarize_with_llm(topic: Topic, paper: dict[str, Any], base_match: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
+def normalize_llm_analysis(
+    data: dict[str, Any],
+    paper: dict[str, Any],
+    best_match: dict[str, Any],
+) -> dict[str, Any]:
+    fallback = fallback_analysis(paper, best_match)
+    paper_title = normalize_space(str(paper.get("title") or ""))
+
+    title_value = data.get("title")
+    title_zh = ""
+    if isinstance(title_value, dict):
+        title_zh = normalize_space(
+            str(
+                title_value.get("zh")
+                or title_value.get("cn")
+                or title_value.get("chinese")
+                or title_value.get("translation")
+                or ""
+            )
+        )
+    elif isinstance(title_value, str):
+        # Tolerate a model that returns only a Chinese title string.
+        title_zh = normalize_space(title_value)
+
+    analysis: dict[str, Any] = {
+        "schema_version": 2,
+        # Always trust the source title rather than a model-regenerated English title.
+        "title": analysis_pair(paper_title, title_zh),
+    }
+
+    max_items_by_field = {
+        "problem": 2,
+        "method": 3,
+        "innovation": 2,
+        "evidence": 2,
+        "limitations": 2,
+        "why_relevant": 2,
+    }
+
+    for field in BILINGUAL_ANALYSIS_FIELDS:
+        analysis[field] = normalize_analysis_pair_list(
+            data.get(field),
+            fallback=fallback.get(field, []),
+            max_items=max_items_by_field[field],
+        )
+
+    return analysis
+
+
+def summarize_with_llm(
+    topic: Topic,
+    paper: dict[str, Any],
+    base_match: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if not llm_enabled():
-        return fallback_summary(paper, base_match), base_match
+        return fallback_analysis(paper, base_match), base_match
 
     prompt = build_llm_prompt(topic, paper, base_match)
     try:
         data = call_openai_compatible(prompt)
     except Exception as exc:
         print(f"Warning: LLM summary failed for {paper.get('id')}: {exc}", file=sys.stderr)
-        return fallback_summary(paper, base_match), base_match
+        return fallback_analysis(paper, base_match), base_match
 
-    summary = {
-        "problem": str(data.get("problem", "")),
-        "method": str(data.get("method", "")),
-        "innovation": str(data.get("innovation", "")),
-        "evidence": str(data.get("evidence", "")),
-        "limitations": str(data.get("limitations", "")),
-        "why_relevant": str(data.get("why_relevant", "")),
-    }
-    adjustment = float(data.get("match_score_adjustment", 0.0) or 0.0)
-    adjusted_score = max(0.0, min(1.0, base_match["score"] + adjustment))
+    analysis = normalize_llm_analysis(data, paper, base_match)
+
+    try:
+        adjustment = float(data.get("match_score_adjustment", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        adjustment = 0.0
+
+    adjusted_score = max(0.0, min(1.0, float(base_match["score"]) + adjustment))
     adjusted_level = str(data.get("match_level") or match_level(adjusted_score)).lower()
     if adjusted_level not in {"high", "medium", "low"}:
         adjusted_level = match_level(adjusted_score)
+
     adjusted_match = dict(base_match)
     adjusted_match["score"] = round(adjusted_score, 3)
     adjusted_match["level"] = adjusted_level
-    adjusted_match["llm_reason"] = summary["why_relevant"]
-    return summary, adjusted_match
+
+    legacy = analysis_to_legacy_summary(analysis)
+    adjusted_match["llm_reason"] = legacy.get("why_relevant", "")
+    adjusted_match["analysis_schema_version"] = 2
+
+    return analysis, adjusted_match
 
 
-def summarize_one(args: tuple[Topic, dict[str, Any]]) -> tuple[str, dict[str, str], dict[str, Any]]:
+def summarize_one(args: tuple[Topic, dict[str, Any]]) -> tuple[str, dict[str, Any], dict[str, Any]]:
     topic, paper = args
     paper_id = str(paper.get("id", ""))
-    summary, adjusted_match = summarize_with_llm(topic, paper, paper["best_match"])
-    return paper_id, summary, adjusted_match
+    analysis, adjusted_match = summarize_with_llm(topic, paper, paper["best_match"])
+    return paper_id, analysis, adjusted_match
 
 
 def dedupe_papers(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2290,7 +2568,7 @@ def collect(
         key=lambda p: (p["best_match"]["score"], paper_activity_datetime(p)),
         reverse=True,
     )
-    summaries_by_id: dict[str, tuple[dict[str, str], dict[str, Any]]] = {}
+    analyses_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     llm_jobs = []
     for paper in recent_papers[:max_summaries]:
         if not should_summarize_paper_with_llm(paper):
@@ -2304,23 +2582,30 @@ def collect(
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [executor.submit(summarize_one, job) for job in llm_jobs]
             for future in concurrent.futures.as_completed(futures):
-                paper_id, summary, adjusted_match = future.result()
-                summaries_by_id[paper_id] = (summary, adjusted_match)
-                print(f"Finished summary: {paper_id}", flush=True)
+                paper_id, analysis, adjusted_match = future.result()
+                analyses_by_id[paper_id] = (analysis, adjusted_match)
+                print(f"Finished bilingual analysis: {paper_id}", flush=True)
     else:
         for topic, paper in llm_jobs:
-            summary, adjusted_match = summarize_with_llm(topic, paper, paper["best_match"])
-            summaries_by_id[str(paper.get("id", ""))] = (summary, adjusted_match)
+            analysis, adjusted_match = summarize_with_llm(topic, paper, paper["best_match"])
+            analyses_by_id[str(paper.get("id", ""))] = (analysis, adjusted_match)
 
     for index, paper in enumerate(recent_papers):
         paper_id = str(paper.get("id", ""))
-        if index < max_summaries and paper_id in summaries_by_id:
-            summary, adjusted_match = summaries_by_id[paper_id]
-            paper["chinese_summary"] = summary
+        if index < max_summaries and paper_id in analyses_by_id:
+            analysis, adjusted_match = analyses_by_id[paper_id]
+            paper["ai_analysis"] = analysis
+            # Keep the legacy field until the new web UI is deployed.
+            paper["chinese_summary"] = analysis_to_legacy_summary(analysis)
             paper["best_match"] = adjusted_match
-            paper["matches"] = [adjusted_match if m["topic_id"] == adjusted_match["topic_id"] else m for m in paper["matches"]]
+            paper["matches"] = [
+                adjusted_match if m["topic_id"] == adjusted_match["topic_id"] else m
+                for m in paper["matches"]
+            ]
         else:
-            paper["chinese_summary"] = fallback_summary(paper, paper["best_match"])
+            analysis = fallback_analysis(paper, paper["best_match"])
+            paper["ai_analysis"] = analysis
+            paper["chinese_summary"] = analysis_to_legacy_summary(analysis)
 
     daily_recent_papers = [paper for paper in recent_papers if paper.get("source_type") != "conference"]
     conference_recent_papers = [paper for paper in recent_papers if paper.get("source_type") == "conference"]
