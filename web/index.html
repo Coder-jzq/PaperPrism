@@ -15,7 +15,7 @@
 
     <meta
       name="description"
-      content="Paper Daily - 自动追踪与你研究方向相关的最新论文"
+      content="Paper Daily - 自动追踪、阅读并精选与你研究方向相关的最新论文"
     />
 
     <title>Paper Daily</title>
@@ -25,7 +25,7 @@
     -->
     <link
       rel="stylesheet"
-      href="./styles.css?v=20260908-pink-v1"
+      href="./styles.css?v=20260909-reading-v1"
     />
   </head>
 
@@ -214,15 +214,18 @@
           </p>
 
           <h2 id="viewTitle">
-            最新论文
+            个人论文阅读工作台
           </h2>
+
+          <p class="overview-subtitle">
+            新论文进入未读列表；已读与精选状态仅保存在当前浏览器中。
+          </p>
 
         </div>
 
 
         <!-- Statistics -->
         <div class="metric-grid">
-
 
           <!-- Total Papers -->
           <div class="metric">
@@ -297,6 +300,117 @@
 
 
       <!-- ===================================================
+           Reading State Navigation
+           =================================================== -->
+
+      <section
+        class="reading-nav-wrap"
+        aria-label="阅读状态"
+      >
+
+        <div
+          class="reading-tabs"
+          role="tablist"
+          aria-label="未读、已读和精选"
+        >
+
+          <button
+            class="reading-tab active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            data-reading-state="unread"
+          >
+            <span
+              class="reading-tab-icon"
+              aria-hidden="true"
+            >
+              ◌
+            </span>
+
+            <span class="reading-tab-text">
+              未读
+            </span>
+
+            <span
+              class="reading-tab-count"
+              id="unreadCount"
+            >
+              0
+            </span>
+          </button>
+
+
+          <button
+            class="reading-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            data-reading-state="read"
+          >
+            <span
+              class="reading-tab-icon"
+              aria-hidden="true"
+            >
+              ✓
+            </span>
+
+            <span class="reading-tab-text">
+              已读
+            </span>
+
+            <span
+              class="reading-tab-count"
+              id="readCount"
+            >
+              0
+            </span>
+          </button>
+
+
+          <button
+            class="reading-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            data-reading-state="favorite"
+          >
+            <span
+              class="reading-tab-icon"
+              aria-hidden="true"
+            >
+              ★
+            </span>
+
+            <span class="reading-tab-text">
+              精选
+            </span>
+
+            <span
+              class="reading-tab-count"
+              id="favoriteCount"
+            >
+              0
+            </span>
+          </button>
+
+        </div>
+
+
+        <div
+          class="local-state-note"
+          title="阅读状态保存在浏览器 localStorage 中，不会上传到服务器。"
+        >
+          <span aria-hidden="true">
+            ⌁
+          </span>
+          本地阅读记录
+        </div>
+
+      </section>
+
+
+      <!-- ===================================================
            Toolbar / Filter
            =================================================== -->
 
@@ -336,7 +450,7 @@
         <div
           class="tabs"
           role="tablist"
-          aria-label="视图"
+          aria-label="时间范围"
         >
 
           <button
@@ -369,14 +483,6 @@
             data-view="month"
           >
             本月
-          </button>
-
-          <button
-            class="tab"
-            type="button"
-            data-view="highlights"
-          >
-            本周精选
           </button>
 
         </div>
@@ -484,7 +590,7 @@
           <div>
 
             <h2 id="listTitle">
-              当日论文
+              未读论文
             </h2>
 
             <p id="scopeLabel">
@@ -501,6 +607,29 @@
             0 篇
           </span>
 
+        </div>
+
+
+        <!-- Empty State -->
+        <div
+          id="emptyState"
+          class="empty-state"
+          hidden
+        >
+          <div
+            class="empty-state-icon"
+            aria-hidden="true"
+          >
+            ◌
+          </div>
+
+          <h3 id="emptyStateTitle">
+            这里暂时没有论文
+          </h3>
+
+          <p id="emptyStateText">
+            新论文会自动出现在这里。
+          </p>
         </div>
 
 
@@ -541,7 +670,13 @@
 
 
           <!-- Title -->
-          <h3 class="paper-title"></h3>
+          <div class="paper-title-block">
+
+            <h3 class="paper-title"></h3>
+
+            <p class="paper-title-zh"></p>
+
+          </div>
 
 
           <!-- Authors -->
@@ -553,80 +688,158 @@
 
 
           <!-- =================================================
-               AI Summary
+               AI Bilingual Analysis
                ================================================= -->
 
-          <dl class="summary-grid">
+          <div class="analysis-heading">
+
+            <div>
+
+              <span class="analysis-kicker">
+                AI Analysis
+              </span>
+
+              <h4>
+                双语论文速览
+              </h4>
+
+            </div>
+
+            <span
+              class="analysis-language-hint"
+              aria-label="英文与中文逐句对应"
+            >
+              EN ↔ 中文
+            </span>
+
+          </div>
+
+
+          <dl class="summary-grid bilingual-summary-grid">
 
 
             <!-- Problem -->
-            <div class="summary-item">
+            <div
+              class="summary-item"
+              data-analysis-section="problem"
+            >
 
               <dt>
-                问题
+                <span class="summary-label-en">
+                  Problem
+                </span>
+
+                <span class="summary-label-zh">
+                  问题
+                </span>
               </dt>
 
-              <dd class="summary-problem"></dd>
+              <dd class="summary-problem bilingual-lines"></dd>
 
             </div>
 
 
             <!-- Method -->
-            <div class="summary-item">
+            <div
+              class="summary-item"
+              data-analysis-section="method"
+            >
 
               <dt>
-                方法
+                <span class="summary-label-en">
+                  Method
+                </span>
+
+                <span class="summary-label-zh">
+                  方法
+                </span>
               </dt>
 
-              <dd class="summary-method"></dd>
+              <dd class="summary-method bilingual-lines"></dd>
 
             </div>
 
 
             <!-- Innovation -->
-            <div class="summary-item">
+            <div
+              class="summary-item"
+              data-analysis-section="innovation"
+            >
 
               <dt>
-                创新
+                <span class="summary-label-en">
+                  Innovation
+                </span>
+
+                <span class="summary-label-zh">
+                  创新
+                </span>
               </dt>
 
-              <dd class="summary-innovation"></dd>
+              <dd class="summary-innovation bilingual-lines"></dd>
 
             </div>
 
 
             <!-- Evidence -->
-            <div class="summary-item">
+            <div
+              class="summary-item"
+              data-analysis-section="evidence"
+            >
 
               <dt>
-                证据
+                <span class="summary-label-en">
+                  Evidence
+                </span>
+
+                <span class="summary-label-zh">
+                  证据
+                </span>
               </dt>
 
-              <dd class="summary-evidence"></dd>
+              <dd class="summary-evidence bilingual-lines"></dd>
 
             </div>
 
 
             <!-- Limitations -->
-            <div class="summary-item">
+            <div
+              class="summary-item"
+              data-analysis-section="limitations"
+            >
 
               <dt>
-                局限
+                <span class="summary-label-en">
+                  Limitations
+                </span>
+
+                <span class="summary-label-zh">
+                  局限
+                </span>
               </dt>
 
-              <dd class="summary-limitations"></dd>
+              <dd class="summary-limitations bilingual-lines"></dd>
 
             </div>
 
 
             <!-- Relevance -->
-            <div class="summary-item">
+            <div
+              class="summary-item"
+              data-analysis-section="why_relevant"
+            >
 
               <dt>
-                匹配
+                <span class="summary-label-en">
+                  Relevance
+                </span>
+
+                <span class="summary-label-zh">
+                  匹配
+                </span>
               </dt>
 
-              <dd class="summary-relevant"></dd>
+              <dd class="summary-relevant bilingual-lines"></dd>
 
             </div>
 
@@ -644,6 +857,52 @@
 
           <!-- Match Reason -->
           <span class="match-reason"></span>
+
+
+          <!-- Reading State Actions -->
+          <div
+            class="paper-state-actions"
+            aria-label="阅读状态操作"
+          >
+
+            <button
+              class="state-btn read-btn"
+              type="button"
+              data-action="read"
+              title="标记为已读"
+            >
+              <span aria-hidden="true">
+                ✓
+              </span>
+              已读
+            </button>
+
+            <button
+              class="state-btn favorite-btn"
+              type="button"
+              data-action="favorite"
+              title="加入精选"
+            >
+              <span aria-hidden="true">
+                ☆
+              </span>
+              精选
+            </button>
+
+            <button
+              class="state-btn unread-btn"
+              type="button"
+              data-action="unread"
+              title="取消当前状态并恢复为未读"
+              hidden
+            >
+              <span aria-hidden="true">
+                ↩
+              </span>
+              设为未读
+            </button>
+
+          </div>
 
 
           <!-- Links -->
@@ -684,7 +943,7 @@
       修改版本号用于避免 GitHub Pages / 浏览器读取旧 JS。
     -->
     <script
-      src="./app.js?v=20260908-pink-v1"
+      src="./app.js?v=20260909-reading-v1"
     ></script>
 
   </body>
