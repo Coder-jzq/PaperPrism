@@ -8,10 +8,12 @@ import datetime as dt
 import difflib
 import email.utils
 import html
+import hashlib
 import http.client
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import urllib.error
@@ -33,6 +35,7 @@ ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/sc
 DEFAULT_CONFIG = Path("config/interests.json")
 DEFAULT_OUTPUT = Path("web/data/papers.json")
 DEFAULT_CONFERENCE_OUTPUT = Path("web/data/conference_papers.json")
+DEFAULT_FIGURE_DIR = Path("web/data/figures")
 RETAINED_MATCH_LEVELS = {"high", "medium"}
 DEFAULT_MAX_NEW_PAPERS = 50
 DEFAULT_MAX_STORED_PAPERS = 50
@@ -1539,6 +1542,505 @@ def enrich_conference_papers_from_arxiv(papers: list[dict[str, Any]]) -> dict[st
     return stats
 
 
+
+# =========================================================
+# Model figure extraction
+# =========================================================
+
+FIGURE_CAPTION_RE = re.compile(
+    r"^(?:figure|fig\.?)\s*(\d+[a-z]?)\s*[:.\-–—]?\s*(.*)$",
+    flags=re.I,
+)
+
+MODEL_FIGURE_POSITIVE_WEIGHTS = {
+    "overall architecture": 3.8,
+    "model architecture": 3.5,
+    "network architecture": 3.3,
+    "system architecture": 3.3,
+    "overall framework": 3.6,
+    "proposed framework": 3.4,
+    "framework overview": 3.2,
+    "overview of the framework": 3.2,
+    "overview of our framework": 3.2,
+    "overall pipeline": 3.2,
+    "method pipeline": 3.0,
+    "proposed method": 2.8,
+    "method overview": 3.0,
+    "model overview": 3.0,
+    "system overview": 2.8,
+    "workflow": 2.4,
+    "pipeline": 2.2,
+    "framework": 2.0,
+    "architecture": 2.0,
+    "our model": 1.8,
+    "proposed model": 2.4,
+}
+
+MODEL_FIGURE_NEGATIVE_WEIGHTS = {
+    "ablation": 3.0,
+    "comparison": 2.5,
+    "performance": 2.2,
+    "results": 2.2,
+    "accuracy": 2.0,
+    "distribution": 2.0,
+    "visualization": 1.8,
+    "qualitative": 1.8,
+    "quantitative": 1.8,
+    "confusion matrix": 2.5,
+    "attention map": 2.0,
+    "t-sne": 2.5,
+    "tsne": 2.5,
+    "examples": 1.2,
+    "case study": 1.6,
+}
+
+
+def model_figure_enabled() -> bool:
+    return env_flag("ENABLE_MODEL_FIGURE", True)
+
+
+def model_figure_output_dir() -> Path:
+    return Path(os.getenv("MODEL_FIGURE_DIR", str(DEFAULT_FIGURE_DIR)))
+
+
+def figure_filename_for_paper(paper: dict[str, Any], figure_number: str) -> str:
+    identity = str(paper.get("id") or paper.get("paper_url") or paper.get("title") or "paper")
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12]
+    readable = slugify(identity)[:56] or "paper"
+    number = slugify(str(figure_number)) or "figure"
+    return f"{readable}-{digest}-{number}.png"
+
+
+def download_pdf_limited(url: str) -> bytes:
+    if not url or not re.match(r"^https?://", url, flags=re.I):
+        raise ValueError("No downloadable HTTP(S) PDF URL is available.")
+
+    timeout = env_float("PDF_TIMEOUT_SECONDS", 45.0)
+    max_bytes = max(1, env_int("PDF_MAX_BYTES", 30 * 1024 * 1024))
+
+    headers = {
+        "User-Agent": "paper-daily-collector/1.0 (+https://github.com/Coder-jzq/paper-daily)",
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.5",
+    }
+    request = urllib.request.Request(url, headers=headers)
+
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > max_bytes:
+                    raise ValueError(
+                        f"PDF is too large ({content_length} bytes > {max_bytes} bytes)."
+                    )
+            except ValueError as exc:
+                if "PDF is too large" in str(exc):
+                    raise
+
+        chunks: list[bytes] = []
+        received = 0
+        while True:
+            chunk = response.read(min(1024 * 1024, max_bytes - received + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+            if received > max_bytes:
+                raise ValueError(f"PDF exceeds PDF_MAX_BYTES={max_bytes}.")
+
+    data = b"".join(chunks)
+    content_type = str(response.headers.get("Content-Type") or "").lower()
+
+    if not data.startswith(b"%PDF") and "pdf" not in content_type:
+        raise ValueError("The configured PDF URL did not return a PDF document.")
+
+    if not data.startswith(b"%PDF"):
+        # Some servers prepend a tiny wrapper before the PDF header.
+        header_index = data.find(b"%PDF")
+        if 0 <= header_index <= 1024:
+            data = data[header_index:]
+        else:
+            raise ValueError("Downloaded content does not contain a valid PDF header.")
+
+    return data
+
+
+def figure_caption_score(caption: str, figure_number: int | None = None) -> float:
+    text = normalize_space(caption).lower()
+    if not text:
+        return 0.0
+
+    raw_score = 0.0
+    for phrase, weight in MODEL_FIGURE_POSITIVE_WEIGHTS.items():
+        if phrase in text:
+            raw_score += weight
+
+    for phrase, weight in MODEL_FIGURE_NEGATIVE_WEIGHTS.items():
+        if phrase in text:
+            raw_score -= weight
+
+    # Earlier figures are slightly more likely to be the overall architecture.
+    if figure_number is not None and 1 <= figure_number <= 4:
+        raw_score += max(0.0, 0.45 - 0.08 * (figure_number - 1))
+
+    if 20 <= len(text) <= 800:
+        raw_score += 0.15
+
+    # Map the heuristic score to 0..1 for easier configuration.
+    return round(max(0.0, min(1.0, raw_score / 6.0)), 3)
+
+
+def figure_confidence(score: float) -> str:
+    if score >= 0.72:
+        return "high"
+    if score >= 0.52:
+        return "medium"
+    return "low"
+
+
+def extract_figure_caption_candidates(document: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    max_pages = max(1, env_int("MODEL_FIGURE_MAX_PAGES", 12))
+    for page_index in range(min(len(document), max_pages)):
+        page = document[page_index]
+        for block in page.get_text("blocks"):
+            if len(block) < 5:
+                continue
+
+            raw_text = normalize_space(str(block[4] or ""))
+            if not raw_text:
+                continue
+
+            match = FIGURE_CAPTION_RE.match(raw_text)
+            if not match:
+                continue
+
+            number_text = match.group(1)
+            numeric_match = re.match(r"\d+", number_text)
+            number_int = int(numeric_match.group(0)) if numeric_match else None
+            score = figure_caption_score(raw_text, number_int)
+
+            candidates.append(
+                {
+                    "page_index": page_index,
+                    "page_number": page_index + 1,
+                    "figure_number": f"Figure {number_text}",
+                    "caption": raw_text,
+                    "bbox": tuple(float(value) for value in block[:4]),
+                    "score": score,
+                }
+            )
+
+    candidates.sort(
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            -int(item.get("page_index") or 0),
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def horizontal_overlap_ratio(left: Any, right: Any) -> float:
+    overlap = max(0.0, min(left.x1, right.x1) - max(left.x0, right.x0))
+    denominator = max(1.0, min(left.width, right.width))
+    return overlap / denominator
+
+
+def infer_figure_crop_rect(page: Any, caption_bbox: tuple[float, float, float, float]) -> Any:
+    import fitz
+
+    page_rect = page.rect
+    caption_rect = fitz.Rect(*caption_bbox)
+    page_width = page_rect.width
+    page_height = page_rect.height
+
+    full_width_caption = (
+        caption_rect.width >= page_width * 0.58
+        or (
+            caption_rect.x0 <= page_width * 0.18
+            and caption_rect.x1 >= page_width * 0.52
+        )
+        or (
+            caption_rect.x0 <= page_width * 0.16
+            and caption_rect.x1 >= page_width * 0.84
+        )
+    )
+
+    horizontal_margin = max(8.0, page_width * 0.025)
+
+    if full_width_caption:
+        crop_x0 = page_rect.x0 + horizontal_margin
+        crop_x1 = page_rect.x1 - horizontal_margin
+    else:
+        center = (caption_rect.x0 + caption_rect.x1) / 2.0
+        column_gap = max(8.0, page_width * 0.015)
+
+        if center <= page_width / 2.0:
+            crop_x0 = page_rect.x0 + horizontal_margin
+            crop_x1 = page_rect.x0 + page_width / 2.0 - column_gap
+        else:
+            crop_x0 = page_rect.x0 + page_width / 2.0 + column_gap
+            crop_x1 = page_rect.x1 - horizontal_margin
+
+    crop_x0 = max(page_rect.x0, crop_x0)
+    crop_x1 = min(page_rect.x1, crop_x1)
+
+    target_horizontal = fitz.Rect(
+        crop_x0,
+        page_rect.y0,
+        crop_x1,
+        caption_rect.y0,
+    )
+
+    max_lookback = min(page_height * 0.50, env_float("MODEL_FIGURE_MAX_HEIGHT_POINTS", 390.0))
+    crop_y0 = max(page_rect.y0 + 18.0, caption_rect.y0 - max_lookback)
+
+    # Find the nearest paragraph-like block above the caption. Long prose blocks
+    # are more likely to be body text than labels embedded inside a diagram.
+    nearest_body_bottom = None
+    for block in page.get_text("blocks"):
+        if len(block) < 5:
+            continue
+
+        block_rect = fitz.Rect(*block[:4])
+        block_text = normalize_space(str(block[4] or ""))
+
+        if block_rect.y1 >= caption_rect.y0 - 4:
+            continue
+        if block_rect.y1 < crop_y0:
+            continue
+        if len(block_text) < 110 or len(block_text.split()) < 16:
+            continue
+        if FIGURE_CAPTION_RE.match(block_text):
+            continue
+        if horizontal_overlap_ratio(block_rect, target_horizontal) < 0.48:
+            continue
+
+        if nearest_body_bottom is None or block_rect.y1 > nearest_body_bottom:
+            nearest_body_bottom = block_rect.y1
+
+    if nearest_body_bottom is not None:
+        crop_y0 = max(crop_y0, nearest_body_bottom + 7.0)
+
+    crop_y1 = max(crop_y0 + 1.0, caption_rect.y0 - 4.0)
+
+    # If the inferred region is implausibly short, use a conservative window
+    # directly above the caption.
+    min_height = env_float("MODEL_FIGURE_MIN_HEIGHT_POINTS", 72.0)
+    if crop_y1 - crop_y0 < min_height:
+        crop_y0 = max(page_rect.y0 + 18.0, caption_rect.y0 - min(250.0, page_height * 0.34))
+
+    return fitz.Rect(crop_x0, crop_y0, crop_x1, crop_y1) & page_rect
+
+
+def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
+    unavailable = {
+        "available": False,
+        "figure_number": "",
+        "page": 0,
+        "image": "",
+        "caption": analysis_pair("", ""),
+        "confidence": "none",
+        "score": 0.0,
+        "selection_method": "caption_heuristic",
+    }
+
+    if not model_figure_enabled():
+        unavailable["reason"] = "disabled"
+        return unavailable
+
+    pdf_url = normalize_space(str(paper.get("pdf_url") or ""))
+    if not pdf_url:
+        unavailable["reason"] = "no_pdf_url"
+        return unavailable
+
+    try:
+        import fitz
+    except ImportError:
+        unavailable["reason"] = "pymupdf_not_installed"
+        return unavailable
+
+    try:
+        pdf_bytes = download_pdf_limited(pdf_url)
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as exc:
+        unavailable["reason"] = f"pdf_open_failed: {exc}"
+        return unavailable
+
+    try:
+        candidates = extract_figure_caption_candidates(document)
+        min_score = env_float("MODEL_FIGURE_MIN_SCORE", 0.48)
+        candidate = next(
+            (item for item in candidates if float(item.get("score") or 0.0) >= min_score),
+            None,
+        )
+
+        if not candidate:
+            unavailable["reason"] = "no_architecture_figure_candidate"
+            return unavailable
+
+        page = document[int(candidate["page_index"])]
+        clip = infer_figure_crop_rect(page, candidate["bbox"])
+
+        if clip.width < 80 or clip.height < 60:
+            unavailable["reason"] = "figure_crop_too_small"
+            return unavailable
+
+        output_dir = model_figure_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = figure_filename_for_paper(
+            paper,
+            str(candidate["figure_number"]),
+        )
+        output_path = output_dir / filename
+
+        dpi = max(96, env_int("MODEL_FIGURE_DPI", 180))
+        matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        pixmap = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
+        pixmap.save(str(output_path))
+
+        image_rel = f"./data/figures/{filename}"
+
+        return {
+            "available": True,
+            "figure_number": str(candidate["figure_number"]),
+            "page": int(candidate["page_number"]),
+            "image": image_rel,
+            "caption": analysis_pair(str(candidate["caption"]), ""),
+            "confidence": figure_confidence(float(candidate["score"])),
+            "score": float(candidate["score"]),
+            "selection_method": "caption_heuristic",
+            "source_pdf_url": pdf_url,
+        }
+    except Exception as exc:
+        unavailable["reason"] = f"figure_extract_failed: {exc}"
+        return unavailable
+    finally:
+        document.close()
+
+
+def model_figure_file_exists(model_figure: dict[str, Any]) -> bool:
+    image = normalize_space(str(model_figure.get("image") or ""))
+    if not image:
+        return False
+
+    prefix = "./data/figures/"
+    if image.startswith(prefix):
+        return (model_figure_output_dir() / image[len(prefix):]).exists()
+
+    return False
+
+
+def enrich_model_figures(papers: list[dict[str, Any]]) -> dict[str, Any]:
+    stats = {
+        "model_figure_enabled": model_figure_enabled(),
+        "model_figure_attempted": 0,
+        "model_figure_succeeded": 0,
+        "model_figure_reused": 0,
+        "model_figure_skipped": 0,
+        "model_figure_dependency_available": True,
+    }
+
+    if not model_figure_enabled():
+        return stats
+
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        stats["model_figure_dependency_available"] = False
+        stats["model_figure_skipped"] = len(papers)
+        print(
+            "Warning: ENABLE_MODEL_FIGURE is enabled but PyMuPDF is not installed; "
+            "model figure extraction is skipped.",
+            file=sys.stderr,
+        )
+        return stats
+
+    max_figures = max(0, env_int("MAX_MODEL_FIGURES_PER_RUN", 20))
+    delay_seconds = max(0.0, env_float("MODEL_FIGURE_DELAY_SECONDS", 1.0))
+    attempts = 0
+
+    for paper in papers:
+        existing = paper.get("model_figure")
+        if isinstance(existing, dict) and existing.get("available") and model_figure_file_exists(existing):
+            stats["model_figure_reused"] += 1
+            continue
+
+        if attempts >= max_figures:
+            stats["model_figure_skipped"] += 1
+            continue
+
+        if not normalize_space(str(paper.get("pdf_url") or "")):
+            paper["model_figure"] = {
+                "available": False,
+                "reason": "no_pdf_url",
+            }
+            stats["model_figure_skipped"] += 1
+            continue
+
+        attempts += 1
+        stats["model_figure_attempted"] += 1
+
+        figure = extract_model_figure(paper)
+        paper["model_figure"] = figure
+
+        if figure.get("available"):
+            stats["model_figure_succeeded"] += 1
+            print(
+                f"Extracted model figure for {paper.get('id')}: "
+                f"{figure.get('figure_number')} page={figure.get('page')} "
+                f"score={figure.get('score')}",
+                flush=True,
+            )
+        else:
+            stats["model_figure_skipped"] += 1
+            print(
+                f"Model figure not found for {paper.get('id')}: {figure.get('reason', 'unknown')}",
+                flush=True,
+            )
+
+        if attempts < max_figures and delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+    return stats
+
+
+def prune_unreferenced_model_figures(papers: list[dict[str, Any]]) -> int:
+    output_dir = model_figure_output_dir()
+    if not output_dir.exists():
+        return 0
+
+    keep: set[str] = set()
+    prefix = "./data/figures/"
+
+    for paper in papers:
+        figure = paper.get("model_figure")
+        if not isinstance(figure, dict) or not figure.get("available"):
+            continue
+        image = normalize_space(str(figure.get("image") or ""))
+        if image.startswith(prefix):
+            keep.add(Path(image[len(prefix):]).name)
+
+    removed = 0
+    for path in output_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.name in keep:
+            continue
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            continue
+
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            print(f"Warning: cannot remove stale model figure {path}: {exc}", file=sys.stderr)
+
+    return removed
+
+
 def should_summarize_paper_with_llm(paper: dict[str, Any]) -> bool:
     has_summary = has_meaningful_summary(paper)
     if paper.get("source_type") == "conference" and not has_summary:
@@ -1551,6 +2053,7 @@ def should_summarize_paper_with_llm(paper: dict[str, Any]) -> bool:
 
 
 BILINGUAL_ANALYSIS_FIELDS = (
+    "task_intro",
     "problem",
     "method",
     "innovation",
@@ -1637,24 +2140,30 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
 
     if paper.get("source_type") == "conference" and not has_meaningful_summary(paper):
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "title": analysis_pair(title, ""),
+            "task_intro": [
+                analysis_pair(
+                    "The exact research task cannot be defined reliably because the conference index does not provide a usable abstract.",
+                    "由于会议索引没有提供可用摘要，目前无法可靠定义这篇论文所研究的具体任务。",
+                )
+            ],
             "problem": [
                 analysis_pair(
-                    "The conference index does not provide a reliable abstract for this paper.",
-                    "会议索引没有为这篇论文提供可靠摘要。",
+                    "The conference index does not provide enough evidence to reconstruct the concrete research problem addressed by this paper.",
+                    "会议索引提供的信息不足以可靠还原这篇论文所解决的具体研究问题。",
                 )
             ],
             "method": [
                 analysis_pair(
-                    "Please open the paper page to inspect the method and system details.",
-                    "请打开论文页面查看方法和系统细节。",
+                    "The method architecture, core modules, information flow, and training procedure require the abstract or full paper.",
+                    "方法的整体架构、核心模块、信息流以及训练过程需要结合摘要或论文全文才能判断。",
                 )
             ],
             "innovation": [
                 analysis_pair(
-                    "The innovation cannot be determined reliably from the title alone.",
-                    "仅凭标题无法可靠判断论文的创新点。",
+                    "The paper's technical innovations cannot be determined reliably from bibliographic information alone.",
+                    "仅凭题录信息无法可靠判断论文的技术创新点。",
                 )
             ],
             "evidence": [
@@ -1665,8 +2174,8 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
             ],
             "limitations": [
                 analysis_pair(
-                    "Automatic analysis is limited until an abstract is found from arXiv, OpenAlex, Crossref, or another trusted source.",
-                    "在 arXiv、OpenAlex、Crossref 或其他可信来源找到摘要之前，自动分析能力会受到限制。",
+                    "Automatic technical analysis is limited until a reliable abstract is found from arXiv, OpenAlex, Crossref, or another trusted source.",
+                    "在 arXiv、OpenAlex、Crossref 或其他可信来源找到可靠摘要之前，自动技术分析能力会受到限制。",
                 )
             ],
             "why_relevant": [
@@ -1679,23 +2188,29 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
 
     if not has_meaningful_summary(paper):
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "title": analysis_pair(title, ""),
+            "task_intro": [
+                analysis_pair(
+                    "The source does not provide enough abstract information to define the paper's input, output, and research objective reliably.",
+                    "来源没有提供足够的摘要信息，因此无法可靠定义论文任务的输入、输出和研究目标。",
+                )
+            ],
             "problem": [
                 analysis_pair(
-                    "The source does not provide enough abstract information for a reliable problem summary.",
-                    "来源没有提供足够摘要信息，因此无法可靠概括论文问题。",
+                    "The source does not provide enough abstract information for a reliable problem analysis.",
+                    "来源没有提供足够摘要信息，因此无法可靠分析论文所解决的问题。",
                 )
             ],
             "method": [
                 analysis_pair(
-                    "Please open the paper page to inspect the method details.",
-                    "请打开论文页面查看方法细节。",
+                    "The method architecture and technical pipeline should be inspected from the abstract or full paper.",
+                    "方法架构与技术流程需要结合摘要或论文全文进一步查看。",
                 )
             ],
             "innovation": [
                 analysis_pair(
-                    "The innovation cannot be extracted reliably from the available metadata.",
+                    "The innovations cannot be extracted reliably from the available metadata.",
                     "现有元数据不足以可靠提取论文创新点。",
                 )
             ],
@@ -1707,8 +2222,8 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
             ],
             "limitations": [
                 analysis_pair(
-                    "Missing abstract information reduces the quality of relevance analysis and bilingual summarization.",
-                    "缺少摘要信息会降低相关性分析和双语总结的质量。",
+                    "Missing abstract information reduces the reliability of task definition, technical analysis, and bilingual summarization.",
+                    "缺少摘要信息会降低任务定义、技术分析和双语总结的可靠性。",
                 )
             ],
             "why_relevant": [
@@ -1720,8 +2235,14 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
         }
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "title": analysis_pair(title, ""),
+        "task_intro": [
+            analysis_pair(
+                "The source abstract is available, but the configured LLM analysis is unavailable, so a reliable detailed task definition is not generated automatically.",
+                "来源摘要可用，但当前无法使用已配置的 LLM，因此不会自动生成详细任务定义。",
+            )
+        ],
         "problem": [
             analysis_pair(
                 "The LLM analysis is unavailable, so only a basic metadata-based assessment is shown.",
@@ -1730,14 +2251,14 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
         ],
         "method": [
             analysis_pair(
-                "Please refer to the source abstract or paper page for the detailed method.",
-                "请参考来源摘要或论文页面查看详细方法。",
+                "Please refer to the source abstract or paper page for the detailed architecture, modules, information flow, and training procedure.",
+                "请参考来源摘要或论文页面查看详细的架构、模块、信息流和训练过程。",
             )
         ],
         "innovation": [
             analysis_pair(
-                "A precise innovation summary requires the configured LLM analysis.",
-                "精确的创新点总结需要启用已配置的 LLM 分析。",
+                "A precise innovation analysis requires the configured LLM.",
+                "精确的创新点分析需要启用已配置的 LLM。",
             )
         ],
         "evidence": [
@@ -1748,8 +2269,8 @@ def fallback_analysis(paper: dict[str, Any], best_match: dict[str, Any]) -> dict
         ],
         "limitations": [
             analysis_pair(
-                "The fallback mode does not perform deep technical comparison or sentence-aligned translation.",
-                "基础回退模式不会进行深度技术比较或逐句双语分析。",
+                "The fallback mode does not perform deep technical decomposition or sentence-aligned bilingual analysis.",
+                "基础回退模式不会进行深度技术拆解或逐句双语分析。",
             )
         ],
         "why_relevant": [
@@ -1972,31 +2493,97 @@ def build_llm_prompt(topic: Topic, paper: dict[str, Any], base_match: dict[str, 
     paper_title = normalize_space(str(paper.get("title") or ""))
 
     return f"""
-You are analyzing a research paper for a personal paper-reading dashboard.
+You are analyzing a research paper for a serious personal paper-reading dashboard.
 
-Your task is to produce a concise bilingual technical analysis in sentence-aligned English-Chinese pairs.
+Produce a detailed but disciplined bilingual technical reading note in sentence-aligned English-Chinese pairs.
 The English sentence is the primary technical statement; the Chinese sentence must be its faithful, natural translation.
 
-IMPORTANT RULES:
-1. Use ONLY information supported by the supplied title, abstract/bibliographic information, categories, and research-interest context.
-2. Do not invent experiments, datasets, numerical results, model components, causal claims, or conclusions that are not supported.
-3. The title.original field MUST reproduce the supplied paper title exactly. title.zh should be a natural Chinese translation.
-4. For problem, method, innovation, evidence, limitations, and why_relevant:
-   - Return an array of sentence pairs.
-   - Each array element contains exactly one complete English sentence in "original" and its sentence-aligned Chinese translation in "zh".
-   - Do not merge multiple unrelated English sentences into one pair.
-   - Preserve important technical terminology, model names, dataset names, task names, and abbreviations.
-5. The English side should be a faithful technical summary rather than unnecessary verbatim copying. When the abstract gives a precise technical formulation, preserve its terminology.
-6. For limitations, distinguish explicit limitations from cautious inference. If the abstract does not state a limitation, phrase it conservatively, e.g. "The abstract does not report ...".
-7. Keep the analysis compact:
-   - problem: 1-2 sentence pairs
-   - method: 1-3 sentence pairs
-   - innovation: 1-2 sentence pairs
-   - evidence: 1-2 sentence pairs
-   - limitations: 1-2 sentence pairs
-   - why_relevant: 1-2 sentence pairs
-8. Relevance must be strict. If the paper is only broadly related, lower match_level to medium or low.
-9. Output ONLY valid JSON. Do not output Markdown or explanatory text outside JSON.
+CORE PRINCIPLE:
+Every technical claim MUST be supported by the supplied title, abstract/bibliographic information, categories, or research-interest context.
+Do not invent any experiment, dataset, metric, model component, loss function, training strategy, result, or conclusion.
+
+SECTION REQUIREMENTS:
+
+1. title
+   - title.original MUST reproduce the supplied paper title exactly.
+   - title.zh is a faithful Chinese translation.
+
+2. task_intro
+   Explain the research TASK itself before discussing this paper's contribution.
+   Prefer 2-3 sentence pairs:
+   - What research direction/task is being studied?
+   - What is the typical input or observed information?
+   - What output, prediction, generation, retrieval, reasoning result, or optimization objective is expected?
+   - If the abstract does not make input/output explicit, describe only what can be supported and say what remains unspecified.
+   - This section should help a reader unfamiliar with the area understand what the task means.
+
+3. problem
+   Make the problem analysis much clearer than a short abstract paraphrase.
+   Prefer 3-4 sentence pairs that form a logical chain:
+   - What do existing approaches or current practice do?
+   - What limitation, bottleneck, mismatch, or unresolved challenge is identified?
+   - Why is that limitation technically important?
+   - What concrete problem does this paper therefore aim to solve?
+   Do not invent a criticism if the abstract does not state one. Use cautious wording such as
+   "The abstract motivates..." or "The abstract does not specify..." where appropriate.
+
+4. method
+   This should be the most detailed section.
+   Prefer 4-7 sentence pairs and explain the technical pipeline in reading order:
+   - overall framework or main idea;
+   - input representation / encoder / backbone, if stated;
+   - key modules or stages;
+   - how information flows or interacts between modules;
+   - training objective / optimization / supervision, if stated;
+   - inference or output stage, if stated.
+   Each sentence pair should describe ONE technical step.
+   Preserve exact method names, module names, acronyms, datasets, and task terminology appearing in the abstract.
+   If details are absent, explicitly say they are not reported in the abstract instead of filling them in.
+
+5. innovation
+   Prefer 2-4 sentence pairs.
+   Each pair should state ONE distinct innovation or contribution.
+   Explain what is new relative to the limitation/problem described above, not merely repeat the method.
+   Do not call something "first", "novel", "state-of-the-art", or "significant" unless supported by the supplied source.
+
+6. evidence
+   Prefer 1-3 sentence pairs.
+   Report only evidence explicitly supported by the source:
+   - experiments,
+   - datasets,
+   - benchmarks,
+   - quantitative improvements,
+   - theoretical analysis,
+   - human evaluation,
+   - ablations,
+   - or other validation.
+   Never invent numbers.
+
+7. limitations
+   Prefer 1-2 sentence pairs.
+   Distinguish explicit limitations from missing information.
+   When limitations are not stated, use cautious statements such as:
+   "The abstract does not report performance under ..."
+   Do not manufacture weaknesses.
+
+8. why_relevant
+   Prefer 1-2 sentence pairs.
+   Explain the connection to the configured research interest.
+   Relevance should be strict and technical rather than generic.
+
+PAIR FORMAT:
+- Every section above except title MUST be an array.
+- Every array element MUST contain exactly:
+  {{"original": "One complete English sentence.", "zh": "对应的一句中文。"}}
+- Keep English and Chinese one-to-one and in the same order.
+- Do not combine several unrelated claims into one pair.
+
+RELEVANCE:
+- If the paper is only broadly related, lower match_level to medium or low.
+- match_score_adjustment should normally be modest.
+
+OUTPUT:
+Return ONLY valid JSON. No Markdown. No explanation outside JSON.
 
 Research interest:
 Name: {topic.name}
@@ -2020,23 +2607,26 @@ Return JSON with EXACTLY this structure:
     "original": {json.dumps(paper_title, ensure_ascii=False)},
     "zh": "中文标题"
   }},
+  "task_intro": [
+    {{"original": "One English task-definition sentence.", "zh": "对应的一句中文。"}}
+  ],
   "problem": [
-    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+    {{"original": "One English problem-analysis sentence.", "zh": "对应的一句中文。"}}
   ],
   "method": [
-    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+    {{"original": "One English technical-method sentence.", "zh": "对应的一句中文。"}}
   ],
   "innovation": [
-    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+    {{"original": "One English innovation sentence.", "zh": "对应的一句中文。"}}
   ],
   "evidence": [
-    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+    {{"original": "One English evidence sentence.", "zh": "对应的一句中文。"}}
   ],
   "limitations": [
-    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+    {{"original": "One English limitation sentence.", "zh": "对应的一句中文。"}}
   ],
   "why_relevant": [
-    {{"original": "One English sentence.", "zh": "对应的一句中文。"}}
+    {{"original": "One English relevance sentence.", "zh": "对应的一句中文。"}}
   ],
   "match_score_adjustment": 0.0,
   "match_level": "high|medium|low"
@@ -2069,16 +2659,17 @@ def normalize_llm_analysis(
         title_zh = normalize_space(title_value)
 
     analysis: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         # Always trust the source title rather than a model-regenerated English title.
         "title": analysis_pair(paper_title, title_zh),
     }
 
     max_items_by_field = {
-        "problem": 2,
-        "method": 3,
-        "innovation": 2,
-        "evidence": 2,
+        "task_intro": 3,
+        "problem": 4,
+        "method": 7,
+        "innovation": 4,
+        "evidence": 3,
         "limitations": 2,
         "why_relevant": 2,
     }
@@ -2126,7 +2717,7 @@ def summarize_with_llm(
 
     legacy = analysis_to_legacy_summary(analysis)
     adjusted_match["llm_reason"] = legacy.get("why_relevant", "")
-    adjusted_match["analysis_schema_version"] = 2
+    adjusted_match["analysis_schema_version"] = 3
 
     return analysis, adjusted_match
 
@@ -2363,6 +2954,12 @@ def collect(
 ) -> dict[str, Any]:
     default_config = load_json(config_path)
     config = load_issue_config(default_config)
+
+    if clear_cache and model_figure_output_dir().exists():
+        try:
+            shutil.rmtree(model_figure_output_dir())
+        except OSError as exc:
+            print(f"Warning: cannot clear model figure directory: {exc}", file=sys.stderr)
     topics = parse_topics(config)
     sources = parse_sources(config)
     now = dt.datetime.now(dt.timezone.utc)
@@ -2607,6 +3204,11 @@ def collect(
             paper["ai_analysis"] = analysis
             paper["chinese_summary"] = analysis_to_legacy_summary(analysis)
 
+    # Extract an original model/framework figure from the source PDF only after
+    # relevance filtering and LLM analysis, so we do not download PDFs for the
+    # entire raw candidate pool.
+    model_figure_stats = enrich_model_figures(recent_papers)
+
     daily_recent_papers = [paper for paper in recent_papers if paper.get("source_type") != "conference"]
     conference_recent_papers = [paper for paper in recent_papers if paper.get("source_type") == "conference"]
     daily_merged_papers, daily_retention_stats = merge_with_retained_papers(
@@ -2654,6 +3256,7 @@ def collect(
         "cached_conference_candidate_count": cached_conference_candidate_count,
         "clear_cache": clear_cache,
         **conference_enrichment_stats,
+        **model_figure_stats,
     }
 
     payload = {
@@ -2702,6 +3305,16 @@ def collect(
     conference_payload["stats"].update(conference_storage_stats)
     conference_payload["stats"]["paper_count"] = len(conference_trimmed_papers)
     conference_payload["stats"]["data_bytes"] = json_size_bytes(conference_payload)
+    write_json(conference_output_path, conference_payload)
+
+    removed_figures = prune_unreferenced_model_figures(
+        [*payload.get("papers", []), *conference_payload.get("papers", [])]
+    )
+    payload["stats"]["model_figure_pruned"] = removed_figures
+    conference_payload["stats"]["model_figure_pruned"] = removed_figures
+    payload["stats"]["data_bytes"] = json_size_bytes(payload)
+    conference_payload["stats"]["data_bytes"] = json_size_bytes(conference_payload)
+    write_json(output_path, payload)
     write_json(conference_output_path, conference_payload)
     return payload
 
