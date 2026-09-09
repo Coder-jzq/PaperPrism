@@ -25,7 +25,7 @@
     -->
     <link
       rel="stylesheet"
-      href="./styles.css?v=20260909-reading-v1"
+      href="./styles.css?v=20260909-paper-reader-v3"
     />
   </head>
 
@@ -700,7 +700,7 @@
               </span>
 
               <h4>
-                双语论文速览
+                深度双语论文速览
               </h4>
 
             </div>
@@ -718,9 +718,30 @@
           <dl class="summary-grid bilingual-summary-grid">
 
 
+            <!-- Task / Research Direction Definition -->
+            <div
+              class="summary-item summary-item-wide task-summary-item"
+              data-analysis-section="task_intro"
+            >
+
+              <dt>
+                <span class="summary-label-en">
+                  Task
+                </span>
+
+                <span class="summary-label-zh">
+                  任务定义
+                </span>
+              </dt>
+
+              <dd class="summary-task bilingual-lines"></dd>
+
+            </div>
+
+
             <!-- Problem -->
             <div
-              class="summary-item"
+              class="summary-item summary-item-wide problem-summary-item"
               data-analysis-section="problem"
             >
 
@@ -741,7 +762,7 @@
 
             <!-- Method -->
             <div
-              class="summary-item"
+              class="summary-item summary-item-wide method-summary-item"
               data-analysis-section="method"
             >
 
@@ -760,9 +781,75 @@
             </div>
 
 
+            <!-- Model Figure -->
+            <div
+              class="summary-item summary-item-wide model-figure-summary-item"
+              data-analysis-section="model_figure"
+              hidden
+            >
+
+              <dt>
+                <span class="summary-label-en">
+                  Model Figure
+                </span>
+
+                <span class="summary-label-zh">
+                  模型框架
+                </span>
+              </dt>
+
+              <dd class="model-figure-container">
+
+                <figure class="model-figure-card">
+
+                  <a
+                    class="model-figure-link"
+                    target="_blank"
+                    rel="noreferrer"
+                    title="查看原始模型图"
+                  >
+                    <img
+                      class="model-figure-image"
+                      loading="lazy"
+                      decoding="async"
+                      alt="论文模型框架图"
+                    />
+                  </a>
+
+                  <figcaption class="model-figure-caption">
+
+                    <p
+                      class="model-figure-caption-original"
+                      lang="en"
+                    ></p>
+
+                    <p
+                      class="model-figure-caption-zh"
+                      lang="zh-CN"
+                    ></p>
+
+                    <div class="model-figure-meta">
+
+                      <span class="model-figure-number"></span>
+
+                      <span class="model-figure-page"></span>
+
+                      <span class="model-figure-confidence"></span>
+
+                    </div>
+
+                  </figcaption>
+
+                </figure>
+
+              </dd>
+
+            </div>
+
+
             <!-- Innovation -->
             <div
-              class="summary-item"
+              class="summary-item summary-item-wide innovation-summary-item"
               data-analysis-section="innovation"
             >
 
@@ -783,7 +870,7 @@
 
             <!-- Evidence -->
             <div
-              class="summary-item"
+              class="summary-item evidence-summary-item"
               data-analysis-section="evidence"
             >
 
@@ -804,7 +891,7 @@
 
             <!-- Limitations -->
             <div
-              class="summary-item"
+              class="summary-item limitations-summary-item"
               data-analysis-section="limitations"
             >
 
@@ -825,7 +912,7 @@
 
             <!-- Relevance -->
             <div
-              class="summary-item"
+              class="summary-item relevance-summary-item"
               data-analysis-section="why_relevant"
             >
 
@@ -835,7 +922,7 @@
                 </span>
 
                 <span class="summary-label-zh">
-                  匹配
+                  与研究兴趣的匹配
                 </span>
               </dt>
 
@@ -943,7 +1030,7 @@
       修改版本号用于避免 GitHub Pages / 浏览器读取旧 JS。
     -->
     <script
-      src="./app.js?v=20260909-reading-v1"
+      src="./app.js?v=20260909-paper-reader-v3"
     ></script>
 
   </body>
