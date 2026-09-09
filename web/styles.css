@@ -1,6 +1,6 @@
 /* =========================================================
-   Paper Daily
-   Reading Workspace UI
+   Paper Daily V3
+   Deep Paper Reading Workspace UI
    Pink Glassmorphism + Soft Neumorphism
    ========================================================= */
 
@@ -3792,5 +3792,1124 @@ body[data-theme="dark"] .paper-card[data-reading-state="favorite"] {
 
     animation-iteration-count:
       1 !important;
+  }
+}
+/* =========================================================
+   35. V3 Deep Paper Reading Layout
+   Task → Problem → Method → Model Figure → Innovation
+   ========================================================= */
+
+/*
+ * V3 turns the core reading sections into full-width blocks.
+ * Evidence / Limitations / Relevance stay compact at the bottom.
+ */
+
+.bilingual-summary-grid {
+  grid-template-columns:
+    repeat(
+      3,
+      minmax(0, 1fr)
+    );
+
+  gap:
+    14px;
+}
+
+.summary-item-wide {
+  grid-column:
+    1 / -1;
+}
+
+.task-summary-item,
+.problem-summary-item,
+.method-summary-item,
+.innovation-summary-item,
+.model-figure-summary-item {
+  padding:
+    20px 21px !important;
+
+  border-color:
+    var(--line-strong) !important;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.38),
+      rgba(255, 255, 255, 0.18)
+    ) !important;
+
+  box-shadow:
+    inset 3px 3px 9px
+    rgba(174, 115, 138, 0.04),
+    inset -3px -3px 9px
+    rgba(255, 255, 255, 0.40),
+    0 8px 22px
+    rgba(175, 112, 139, 0.045) !important;
+}
+
+.task-summary-item {
+  position:
+    relative;
+
+  overflow:
+    hidden;
+
+  background:
+    linear-gradient(
+      135deg,
+      rgba(255, 218, 232, 0.34),
+      rgba(255, 255, 255, 0.28) 58%,
+      rgba(232, 219, 251, 0.25)
+    ) !important;
+}
+
+.task-summary-item::after {
+  position:
+    absolute;
+
+  top:
+    -65px;
+
+  right:
+    -45px;
+
+  width:
+    180px;
+
+  height:
+    180px;
+
+  content:
+    "";
+
+  pointer-events:
+    none;
+
+  border-radius:
+    50%;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(255, 255, 255, 0.58),
+      rgba(255, 255, 255, 0.04) 62%,
+      transparent 70%
+    );
+}
+
+.task-summary-item > * {
+  position:
+    relative;
+
+  z-index:
+    1;
+}
+
+.problem-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 236, 243, 0.34),
+      rgba(255, 255, 255, 0.24)
+    ) !important;
+}
+
+.method-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(246, 239, 255, 0.38),
+      rgba(255, 255, 255, 0.24)
+    ) !important;
+}
+
+.innovation-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 244, 224, 0.34),
+      rgba(255, 255, 255, 0.24)
+    ) !important;
+}
+
+.task-summary-item dt,
+.problem-summary-item dt,
+.method-summary-item dt,
+.innovation-summary-item dt,
+.model-figure-summary-item dt {
+  margin-bottom:
+    14px;
+}
+
+.task-summary-item .summary-label-en,
+.problem-summary-item .summary-label-en,
+.method-summary-item .summary-label-en,
+.innovation-summary-item .summary-label-en,
+.model-figure-summary-item .summary-label-en {
+  font-size:
+    12px;
+
+  letter-spacing:
+    0.09em;
+}
+
+.task-summary-item .summary-label-zh,
+.problem-summary-item .summary-label-zh,
+.method-summary-item .summary-label-zh,
+.innovation-summary-item .summary-label-zh,
+.model-figure-summary-item .summary-label-zh {
+  font-size:
+    12px;
+}
+
+
+/* =========================================================
+   36. V3 Numbered Bilingual Steps
+   ========================================================= */
+
+.bilingual-pair {
+  position:
+    relative;
+
+  display:
+    block;
+
+  min-width:
+    0;
+}
+
+.bilingual-pair-content {
+  min-width:
+    0;
+}
+
+.bilingual-pair-index {
+  position:
+    absolute;
+
+  top:
+    1px;
+
+  left:
+    0;
+
+  display:
+    inline-grid;
+
+  width:
+    28px;
+
+  height:
+    28px;
+
+  place-items:
+    center;
+
+  border:
+    1px solid
+    var(--line-strong);
+
+  border-radius:
+    10px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.75),
+      rgba(255, 222, 235, 0.48)
+    );
+
+  color:
+    var(--primary);
+
+  font-size:
+    11px;
+
+  font-weight:
+    900;
+
+  line-height:
+    1;
+
+  box-shadow:
+    3px 4px 10px
+    rgba(173, 108, 135, 0.07),
+    inset 1px 1px 1px
+    rgba(255, 255, 255, 0.60);
+}
+
+.bilingual-pair-index + .bilingual-pair-content {
+  padding-left:
+    42px;
+}
+
+.summary-item-wide .bilingual-lines {
+  gap:
+    15px;
+}
+
+.summary-item-wide .bilingual-pair {
+  padding-bottom:
+    14px;
+}
+
+.summary-item-wide .bilingual-original {
+  color:
+    var(--english-text);
+
+  font-size:
+    13.5px;
+
+  font-weight:
+    630;
+
+  line-height:
+    1.72;
+}
+
+.summary-item-wide .bilingual-zh {
+  margin-top:
+    5px;
+
+  color:
+    var(--chinese-text);
+
+  font-size:
+    13.5px;
+
+  font-weight:
+    560;
+
+  line-height:
+    1.78;
+}
+
+/*
+ * The Chinese sentence is visually connected to its English source,
+ * but stays stronger than secondary metadata.
+ */
+.summary-item-wide .bilingual-original + .bilingual-zh {
+  padding-left:
+    13px;
+}
+
+.summary-item-wide .bilingual-original + .bilingual-zh::before {
+  top:
+    0.72em;
+
+  width:
+    5px;
+
+  height:
+    5px;
+
+  background:
+    var(--primary);
+
+  opacity:
+    0.55;
+}
+
+
+/* =========================================================
+   37. V3 Task / Problem / Method / Innovation Details
+   ========================================================= */
+
+.task-summary-item .bilingual-original,
+.task-summary-item .bilingual-zh {
+  max-width:
+    1180px;
+}
+
+.problem-summary-item .bilingual-pair,
+.method-summary-item .bilingual-pair,
+.innovation-summary-item .bilingual-pair {
+  border-bottom-color:
+    var(--line-soft);
+}
+
+.problem-summary-item .bilingual-pair:last-child,
+.method-summary-item .bilingual-pair:last-child,
+.innovation-summary-item .bilingual-pair:last-child {
+  border-bottom:
+    0;
+}
+
+.method-summary-item .bilingual-pair-index {
+  color:
+    var(--secondary);
+
+  border-color:
+    rgba(184, 145, 213, 0.28);
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(247, 238, 255, 0.72),
+      rgba(255, 255, 255, 0.55)
+    );
+}
+
+.innovation-summary-item .bilingual-pair-index {
+  color:
+    var(--favorite-accent);
+
+  border-color:
+    rgba(183, 130, 66, 0.25);
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 241, 213, 0.60),
+      rgba(255, 255, 255, 0.56)
+    );
+}
+
+
+/* =========================================================
+   38. Model Figure
+   ========================================================= */
+
+.model-figure-summary-item {
+  overflow:
+    hidden;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.49),
+      rgba(247, 239, 251, 0.28)
+    ) !important;
+}
+
+.model-figure-container {
+  margin:
+    0;
+}
+
+.model-figure-card {
+  display:
+    grid;
+
+  grid-template-columns:
+    minmax(0, 1fr);
+
+  gap:
+    13px;
+
+  margin:
+    0;
+
+  padding:
+    13px;
+
+  border:
+    1px solid
+    var(--line);
+
+  border-radius:
+    18px;
+
+  background:
+    rgba(255, 255, 255, 0.42);
+
+  box-shadow:
+    inset 3px 3px 10px
+    rgba(180, 121, 145, 0.05),
+    inset -3px -3px 10px
+    rgba(255, 255, 255, 0.42);
+}
+
+.model-figure-link {
+  position:
+    relative;
+
+  display:
+    flex;
+
+  align-items:
+    center;
+
+  justify-content:
+    center;
+
+  min-height:
+    240px;
+
+  overflow:
+    hidden;
+
+  border:
+    1px solid
+    rgba(121, 107, 115, 0.12);
+
+  border-radius:
+    14px;
+
+  background:
+    #ffffff;
+
+  cursor:
+    zoom-in;
+
+  text-decoration:
+    none;
+
+  box-shadow:
+    0 9px 24px
+    rgba(87, 67, 76, 0.08);
+
+  transition:
+    border-color 0.22s ease,
+    transform 0.22s ease,
+    box-shadow 0.22s ease;
+}
+
+.model-figure-link::after {
+  position:
+    absolute;
+
+  right:
+    12px;
+
+  bottom:
+    11px;
+
+  display:
+    inline-flex;
+
+  align-items:
+    center;
+
+  justify-content:
+    center;
+
+  min-width:
+    30px;
+
+  min-height:
+    30px;
+
+  padding:
+    4px 8px;
+
+  content:
+    "↗";
+
+  border:
+    1px solid
+    rgba(255, 255, 255, 0.78);
+
+  border-radius:
+    10px;
+
+  background:
+    rgba(39, 31, 35, 0.70);
+
+  color:
+    #ffffff;
+
+  font-size:
+    13px;
+
+  font-weight:
+    850;
+
+  opacity:
+    0;
+
+  backdrop-filter:
+    blur(8px);
+
+  -webkit-backdrop-filter:
+    blur(8px);
+
+  transform:
+    translateY(4px);
+
+  transition:
+    opacity 0.20s ease,
+    transform 0.20s ease;
+}
+
+.model-figure-link:hover {
+  border-color:
+    var(--line-strong);
+
+  transform:
+    translateY(-1px);
+
+  box-shadow:
+    0 13px 30px
+    rgba(87, 67, 76, 0.11);
+}
+
+.model-figure-link:hover::after {
+  opacity:
+    1;
+
+  transform:
+    translateY(0);
+}
+
+.model-figure-image {
+  display:
+    block;
+
+  width:
+    100%;
+
+  max-width:
+    1180px;
+
+  max-height:
+    760px;
+
+  object-fit:
+    contain;
+
+  background:
+    #ffffff;
+}
+
+.model-figure-caption {
+  display:
+    grid;
+
+  gap:
+    6px;
+
+  margin:
+    0;
+
+  padding:
+    3px 4px 1px;
+}
+
+.model-figure-caption-original,
+.model-figure-caption-zh {
+  margin:
+    0;
+
+  overflow-wrap:
+    anywhere;
+}
+
+.model-figure-caption-original {
+  color:
+    var(--english-text);
+
+  font-size:
+    12.5px;
+
+  font-weight:
+    620;
+
+  line-height:
+    1.62;
+}
+
+.model-figure-caption-zh {
+  color:
+    var(--chinese-text);
+
+  font-size:
+    12.5px;
+
+  font-weight:
+    540;
+
+  line-height:
+    1.68;
+}
+
+.model-figure-meta {
+  display:
+    flex;
+
+  flex-wrap:
+    wrap;
+
+  gap:
+    7px;
+
+  margin-top:
+    4px;
+}
+
+.model-figure-number,
+.model-figure-page,
+.model-figure-confidence {
+  display:
+    inline-flex;
+
+  align-items:
+    center;
+
+  justify-content:
+    center;
+
+  min-height:
+    25px;
+
+  padding:
+    4px 8px;
+
+  border:
+    1px solid
+    var(--line);
+
+  border-radius:
+    999px;
+
+  background:
+    rgba(255, 255, 255, 0.44);
+
+  color:
+    var(--muted);
+
+  font-size:
+    10px;
+
+  font-weight:
+    760;
+
+  line-height:
+    1.2;
+}
+
+.model-figure-number {
+  color:
+    var(--primary);
+
+  border-color:
+    var(--line-strong);
+}
+
+.model-figure-summary-item[data-figure-confidence="high"]
+.model-figure-confidence {
+  color:
+    var(--read-accent);
+
+  border-color:
+    rgba(201, 111, 150, 0.22);
+
+  background:
+    var(--read-soft);
+}
+
+.model-figure-summary-item[data-figure-confidence="medium"]
+.model-figure-confidence {
+  color:
+    var(--favorite-accent);
+
+  border-color:
+    rgba(183, 130, 66, 0.22);
+
+  background:
+    var(--favorite-soft);
+}
+
+.model-figure-summary-item[data-figure-confidence="low"]
+.model-figure-confidence {
+  color:
+    var(--unread-accent);
+
+  background:
+    var(--unread-soft);
+}
+
+
+/* =========================================================
+   39. Compact Evidence / Limitations / Relevance
+   ========================================================= */
+
+.evidence-summary-item,
+.limitations-summary-item,
+.relevance-summary-item {
+  min-height:
+    100%;
+}
+
+.evidence-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(235, 249, 242, 0.24),
+      rgba(255, 255, 255, 0.20)
+    ) !important;
+}
+
+.limitations-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(248, 242, 244, 0.28),
+      rgba(255, 255, 255, 0.20)
+    ) !important;
+}
+
+.relevance-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 235, 244, 0.28),
+      rgba(255, 255, 255, 0.20)
+    ) !important;
+}
+
+
+/* =========================================================
+   40. Dark Theme V3
+   ========================================================= */
+
+body[data-theme="dark"] .task-summary-item,
+body[data-theme="dark"] .problem-summary-item,
+body[data-theme="dark"] .method-summary-item,
+body[data-theme="dark"] .innovation-summary-item,
+body[data-theme="dark"] .model-figure-summary-item {
+  border-color:
+    rgba(239, 136, 178, 0.14) !important;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.045),
+      rgba(255, 255, 255, 0.018)
+    ) !important;
+
+  box-shadow:
+    inset 3px 3px 9px
+    rgba(0, 0, 0, 0.14),
+    inset -3px -3px 9px
+    rgba(255, 255, 255, 0.009),
+    0 9px 24px
+    rgba(0, 0, 0, 0.12) !important;
+}
+
+body[data-theme="dark"] .task-summary-item {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(223, 122, 164, 0.09),
+      rgba(255, 255, 255, 0.025) 58%,
+      rgba(183, 150, 210, 0.08)
+    ) !important;
+}
+
+body[data-theme="dark"] .bilingual-pair-index {
+  border-color:
+    rgba(239, 136, 178, 0.18);
+
+  background:
+    rgba(255, 255, 255, 0.055);
+
+  box-shadow:
+    3px 4px 10px
+    rgba(0, 0, 0, 0.16);
+}
+
+body[data-theme="dark"] .method-summary-item .bilingual-pair-index {
+  color:
+    #c5a7dd;
+
+  border-color:
+    rgba(183, 150, 210, 0.22);
+
+  background:
+    rgba(183, 150, 210, 0.07);
+}
+
+body[data-theme="dark"] .innovation-summary-item .bilingual-pair-index {
+  color:
+    var(--favorite-accent);
+
+  border-color:
+    rgba(216, 173, 112, 0.20);
+
+  background:
+    rgba(216, 173, 112, 0.06);
+}
+
+body[data-theme="dark"] .model-figure-card {
+  border-color:
+    rgba(255, 255, 255, 0.07);
+
+  background:
+    rgba(255, 255, 255, 0.026);
+
+  box-shadow:
+    inset 3px 3px 10px
+    rgba(0, 0, 0, 0.16),
+    inset -3px -3px 10px
+    rgba(255, 255, 255, 0.008);
+}
+
+body[data-theme="dark"] .model-figure-link {
+  border-color:
+    rgba(255, 255, 255, 0.08);
+
+  /*
+   * Academic figures usually have a white canvas.
+   * Keep it white even in dark mode so labels remain readable.
+   */
+  background:
+    #ffffff;
+
+  box-shadow:
+    0 12px 28px
+    rgba(0, 0, 0, 0.28);
+}
+
+body[data-theme="dark"] .model-figure-number,
+body[data-theme="dark"] .model-figure-page,
+body[data-theme="dark"] .model-figure-confidence {
+  border-color:
+    rgba(255, 255, 255, 0.08);
+
+  background:
+    rgba(255, 255, 255, 0.04);
+}
+
+body[data-theme="dark"] .evidence-summary-item,
+body[data-theme="dark"] .limitations-summary-item,
+body[data-theme="dark"] .relevance-summary-item {
+  background:
+    rgba(255, 255, 255, 0.025) !important;
+}
+
+
+/* =========================================================
+   41. Light / Eye Theme V3 Polish
+   ========================================================= */
+
+body[data-theme="light"] .task-summary-item {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(205, 226, 255, 0.38),
+      rgba(255, 255, 255, 0.35) 58%,
+      rgba(232, 219, 251, 0.28)
+    ) !important;
+}
+
+body[data-theme="light"] .method-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(230, 238, 255, 0.34),
+      rgba(255, 255, 255, 0.27)
+    ) !important;
+}
+
+body[data-theme="eye"] .task-summary-item {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(224, 238, 216, 0.54),
+      rgba(252, 255, 248, 0.42) 58%,
+      rgba(241, 228, 206, 0.30)
+    ) !important;
+}
+
+body[data-theme="eye"] .method-summary-item {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(234, 242, 228, 0.47),
+      rgba(252, 255, 248, 0.30)
+    ) !important;
+}
+
+
+/* =========================================================
+   42. V3 Tablet
+   ========================================================= */
+
+@media (max-width: 1100px) {
+  .bilingual-summary-grid {
+    grid-template-columns:
+      repeat(
+        2,
+        minmax(0, 1fr)
+      );
+  }
+
+  .summary-item-wide {
+    grid-column:
+      1 / -1;
+  }
+
+  .relevance-summary-item {
+    grid-column:
+      1 / -1;
+  }
+
+  .model-figure-image {
+    max-height:
+      680px;
+  }
+}
+
+
+/* =========================================================
+   43. V3 Mobile
+   ========================================================= */
+
+@media (max-width: 720px) {
+  .bilingual-summary-grid {
+    grid-template-columns:
+      1fr;
+  }
+
+  .summary-item-wide,
+  .relevance-summary-item {
+    grid-column:
+      auto;
+  }
+
+  .task-summary-item,
+  .problem-summary-item,
+  .method-summary-item,
+  .innovation-summary-item,
+  .model-figure-summary-item {
+    padding:
+      15px !important;
+
+    border-radius:
+      15px !important;
+  }
+
+  .summary-item-wide .bilingual-lines {
+    gap:
+      12px;
+  }
+
+  .summary-item-wide .bilingual-pair {
+    padding-bottom:
+      12px;
+  }
+
+  .bilingual-pair-index {
+    width:
+      25px;
+
+    height:
+      25px;
+
+    border-radius:
+      9px;
+
+    font-size:
+      10px;
+  }
+
+  .bilingual-pair-index + .bilingual-pair-content {
+    padding-left:
+      36px;
+  }
+
+  .summary-item-wide .bilingual-original {
+    font-size:
+      12.5px;
+
+    line-height:
+      1.68;
+  }
+
+  .summary-item-wide .bilingual-zh {
+    font-size:
+      12.5px;
+
+    line-height:
+      1.72;
+  }
+
+  .model-figure-card {
+    gap:
+      10px;
+
+    padding:
+      8px;
+
+    border-radius:
+      14px;
+  }
+
+  .model-figure-link {
+    min-height:
+      170px;
+
+    border-radius:
+      11px;
+  }
+
+  .model-figure-image {
+    max-height:
+      520px;
+  }
+
+  .model-figure-caption {
+    padding:
+      2px 2px 0;
+  }
+
+  .model-figure-caption-original,
+  .model-figure-caption-zh {
+    font-size:
+      11.5px;
+  }
+
+  .model-figure-meta {
+    gap:
+      5px;
+  }
+
+  .model-figure-number,
+  .model-figure-page,
+  .model-figure-confidence {
+    min-height:
+      23px;
+
+    padding:
+      3px 7px;
+
+    font-size:
+      9.5px;
+  }
+}
+
+
+/* =========================================================
+   44. V3 Very Small Screens
+   ========================================================= */
+
+@media (max-width: 430px) {
+  .bilingual-pair-index {
+    width:
+      23px;
+
+    height:
+      23px;
+  }
+
+  .bilingual-pair-index + .bilingual-pair-content {
+    padding-left:
+      33px;
+  }
+
+  .model-figure-link {
+    min-height:
+      140px;
+  }
+
+  .model-figure-image {
+    max-height:
+      430px;
+  }
+
+  .model-figure-link::after {
+    display:
+      none;
   }
 }
