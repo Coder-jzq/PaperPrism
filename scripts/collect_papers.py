@@ -1593,16 +1593,96 @@ def llm_headers(api_key: str) -> dict[str, str]:
     }
 
 
-def call_openai_compatible(prompt: str) -> dict[str, Any]:
-    api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
-    base_url = os.getenv("LLM_BASE_URL", "")
-    if not base_url:
-        base_url = "https://api.deepseek.com/v1" if os.getenv("DEEPSEEK_API_KEY") else "https://api.openai.com/v1"
-    model = os.getenv("LLM_MODEL", "deepseek-chat" if os.getenv("DEEPSEEK_API_KEY") else "gpt-4o-mini")
+def parse_llm_json_text(content: str) -> dict[str, Any]:
+    """Parse JSON returned by the model, tolerating accidental Markdown fences."""
+    content = content.strip()
+    fenced = re.match(r"^```(?:json)?\\s*(.*?)\\s*```$", content, flags=re.S | re.I)
+    if fenced:
+        content = fenced.group(1).strip()
+    return json.loads(content)
+
+
+def responses_output_text(data: dict[str, Any]) -> str:
+    """
+    Extract text from an OpenAI Responses API compatible response.
+
+    Supports:
+      1) top-level output_text
+      2) output[*].content[*].text
+    """
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    chunks: list[str] = []
+    for item in ensure_list(data.get("output")):
+        if not isinstance(item, dict):
+            continue
+        for content in ensure_list(item.get("content")):
+            if not isinstance(content, dict):
+                continue
+            text_value = content.get("text")
+            if text_value:
+                chunks.append(str(text_value))
+
+    if chunks:
+        return "\\n".join(chunks).strip()
+
+    raise ValueError("Responses API returned no output text")
+
+
+def call_responses_api(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
+    """
+    Call an OpenAI Responses API compatible endpoint.
+
+    Examples:
+      LLM_BASE_URL=https://aihub.top
+        -> https://aihub.top/responses
+
+      LLM_BASE_URL=https://aihub.top/v1
+        -> https://aihub.top/v1/responses
+    """
+    endpoint = base_url.rstrip("/") + "/responses"
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "instructions": "你是严谨的论文技术分析助手。只输出合法 JSON，不要输出 Markdown。",
+        "input": prompt,
+        "store": False,
+    }
+
+    max_output_tokens = env_int("LLM_MAX_OUTPUT_TOKENS", 0)
+    if max_output_tokens > 0:
+        payload["max_output_tokens"] = max_output_tokens
+
+    reasoning_effort = os.getenv("LLM_REASONING_EFFORT", "").strip().lower()
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort}
+
+    print(
+        f"LLM request: mode=responses endpoint={endpoint} model={model}",
+        flush=True,
+    )
+
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=llm_headers(api_key),
+        method="POST",
+    )
+
+    timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    return parse_llm_json_text(responses_output_text(data))
+
+
+def call_chat_completions_api(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
+    """Fallback for traditional OpenAI-compatible Chat Completions endpoints."""
     endpoint = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
-        "temperature": 0.2,
         "response_format": {"type": "json_object"},
         "messages": [
             {
@@ -1612,16 +1692,94 @@ def call_openai_compatible(prompt: str) -> dict[str, Any]:
             {"role": "user", "content": prompt},
         ],
     }
+
+    print(
+        f"LLM request: mode=chat_completions endpoint={endpoint} model={model}",
+        flush=True,
+    )
+
     req = urllib.request.Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers=llm_headers(api_key),
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=90) as resp:
+
+    timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         data = json.loads(resp.read().decode("utf-8"))
+
     content = data["choices"][0]["message"]["content"]
-    return json.loads(content)
+    return parse_llm_json_text(str(content))
+
+
+def call_openai_compatible(prompt: str) -> dict[str, Any]:
+    """
+    Call the configured LLM endpoint.
+
+    LLM_API_MODE:
+      responses        -> force /responses
+      chat_completions -> force /chat/completions
+      auto             -> try /responses first, fallback to chat/completions on 404/405
+
+    For aihub.top Codex-style configuration, use:
+      LLM_BASE_URL=https://aihub.top
+      LLM_MODEL=gpt-5.6
+      LLM_API_MODE=responses
+    """
+    api_key = (
+        os.getenv("LLM_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("DEEPSEEK_API_KEY")
+        or ""
+    )
+
+    base_url = os.getenv("LLM_BASE_URL", "").strip()
+    if not base_url:
+        base_url = (
+            "https://api.deepseek.com/v1"
+            if os.getenv("DEEPSEEK_API_KEY")
+            else "https://api.openai.com/v1"
+        )
+
+    model = os.getenv(
+        "LLM_MODEL",
+        "deepseek-chat" if os.getenv("DEEPSEEK_API_KEY") else "gpt-4o-mini",
+    ).strip()
+
+    mode = os.getenv("LLM_API_MODE", "auto").strip().lower()
+
+    if mode in {"responses", "response"}:
+        return call_responses_api(prompt, api_key, base_url, model)
+
+    if mode in {
+        "chat",
+        "chat_completions",
+        "chat-completions",
+        "chatcompletions",
+    }:
+        return call_chat_completions_api(prompt, api_key, base_url, model)
+
+    if mode != "auto":
+        print(
+            f"Warning: unknown LLM_API_MODE={mode!r}; using auto mode.",
+            file=sys.stderr,
+        )
+
+    try:
+        return call_responses_api(prompt, api_key, base_url, model)
+    except urllib.error.HTTPError as exc:
+        # Only fall back when the Responses endpoint itself is unavailable.
+        # Authentication, model, quota and payload errors should remain visible.
+        if exc.code not in {404, 405}:
+            raise
+
+        print(
+            f"Responses API unavailable (HTTP {exc.code}); "
+            "falling back to chat/completions.",
+            flush=True,
+        )
+        return call_chat_completions_api(prompt, api_key, base_url, model)
 
 
 def build_llm_prompt(topic: Topic, paper: dict[str, Any], base_match: dict[str, Any]) -> str:
