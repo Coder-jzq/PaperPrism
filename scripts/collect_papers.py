@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -1664,6 +1665,278 @@ def download_pdf_limited(url: str) -> bytes:
     return data
 
 
+# =========================================================
+# Introduction extraction for LLM analysis
+# =========================================================
+
+INTRODUCTION_HEADING_RE = re.compile(
+    r"^\s*(?:(?P<number>\d+(?:\.\d+)*)|(?P<roman>[IVXLCDM]+))?[.)]?\s*INTRODUCTION\s*$",
+    flags=re.I,
+)
+
+NUMBERED_SECTION_HEADING_RE = re.compile(
+    r"^\s*(?P<number>\d+(?:\.\d+)*)[.)]?\s+(?P<title>[^.!?]{2,140})\s*$",
+    flags=re.I,
+)
+
+ROMAN_SECTION_HEADING_RE = re.compile(
+    r"^\s*(?P<roman>[IVXLCDM]+)[.)]?\s+(?P<title>[^.!?]{2,140})\s*$",
+    flags=re.I,
+)
+
+UNNUMBERED_SECTION_TITLES = {
+    "background",
+    "related work",
+    "preliminaries",
+    "preliminary",
+    "method",
+    "methods",
+    "methodology",
+    "approach",
+    "proposed method",
+    "proposed approach",
+    "model",
+    "model architecture",
+    "experiments",
+    "experiment",
+    "experimental setup",
+    "materials and methods",
+}
+
+
+def introduction_context_enabled() -> bool:
+    return env_flag("ENABLE_INTRODUCTION_CONTEXT", True)
+
+
+def runtime_pdf_cache_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "paperprism-pdf-runtime-cache"
+
+
+def runtime_pdf_path_for_paper(paper: dict[str, Any]) -> Path:
+    identity = str(paper.get("id") or paper.get("paper_url") or paper.get("title") or "paper")
+    pdf_url = normalize_space(str(paper.get("pdf_url") or ""))
+    digest = hashlib.sha1(f"{identity}|{pdf_url}".encode("utf-8")).hexdigest()[:20]
+    return runtime_pdf_cache_dir() / f"{digest}.pdf"
+
+
+def ensure_runtime_pdf(paper: dict[str, Any]) -> Path:
+    cached = paper.get("_runtime_pdf_path")
+    if isinstance(cached, str) and cached:
+        cached_path = Path(cached)
+        if cached_path.exists() and cached_path.is_file():
+            return cached_path
+
+    pdf_url = normalize_space(str(paper.get("pdf_url") or ""))
+    if not pdf_url:
+        raise ValueError("No downloadable HTTP(S) PDF URL is available.")
+
+    output_path = runtime_pdf_path_for_paper(paper)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not output_path.exists():
+        pdf_bytes = download_pdf_limited(pdf_url)
+        output_path.write_bytes(pdf_bytes)
+
+    paper["_runtime_pdf_path"] = str(output_path)
+    return output_path
+
+
+def roman_to_int(value: str) -> int | None:
+    text = value.upper().strip()
+    if not text or not re.fullmatch(r"[IVXLCDM]+", text):
+        return None
+
+    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    previous = 0
+    for char in reversed(text):
+        current = values[char]
+        if current < previous:
+            total -= current
+        else:
+            total += current
+            previous = current
+    return total if total > 0 else None
+
+
+def introduction_heading_number(line: str) -> int | None:
+    match = INTRODUCTION_HEADING_RE.match(normalize_space(line))
+    if not match:
+        return None
+    if match.group("number"):
+        try:
+            return int(match.group("number").split(".", 1)[0])
+        except (TypeError, ValueError):
+            return None
+    if match.group("roman"):
+        return roman_to_int(match.group("roman"))
+    return None
+
+
+def probable_major_section_heading(line: str, introduction_number: int | None) -> bool:
+    text = normalize_space(line)
+    if not text or len(text) > 150:
+        return False
+
+    lowered = text.lower().strip(" .:-–—")
+    if lowered in UNNUMBERED_SECTION_TITLES:
+        return True
+
+    numbered = NUMBERED_SECTION_HEADING_RE.match(text)
+    if numbered:
+        try:
+            major = int(numbered.group("number").split(".", 1)[0])
+        except (TypeError, ValueError):
+            major = None
+        # A subsection such as 1.1 inside Introduction should not terminate it.
+        number_text = numbered.group("number")
+        if major is not None and "." not in number_text:
+            if introduction_number is None:
+                return major >= 2
+            return major > introduction_number
+
+    roman = ROMAN_SECTION_HEADING_RE.match(text)
+    if roman:
+        major = roman_to_int(roman.group("roman"))
+        if major is not None:
+            if introduction_number is None:
+                return major >= 2
+            return major > introduction_number
+
+    return False
+
+
+def extract_introduction_text_from_document(document: Any) -> str:
+    max_pages = max(1, env_int("INTRODUCTION_MAX_PAGES", 8))
+    max_chars = max(1000, env_int("INTRODUCTION_MAX_CHARS", 12000))
+    min_chars = max(80, env_int("INTRODUCTION_MIN_CHARS", 240))
+
+    lines: list[str] = []
+    for page_index in range(min(len(document), max_pages)):
+        page_text = document[page_index].get_text("text") or ""
+        for raw_line in page_text.splitlines():
+            line = normalize_space(raw_line)
+            if line:
+                lines.append(line)
+
+    start_index = None
+    intro_number = None
+    for index, line in enumerate(lines):
+        if INTRODUCTION_HEADING_RE.match(line):
+            start_index = index + 1
+            intro_number = introduction_heading_number(line)
+            break
+
+    if start_index is None:
+        return ""
+
+    collected: list[str] = []
+    current_chars = 0
+    for line in lines[start_index:]:
+        if probable_major_section_heading(line, intro_number):
+            break
+
+        # Skip isolated page numbers and obvious running-page artifacts.
+        if re.fullmatch(r"\d{1,4}", line):
+            continue
+
+        collected.append(line)
+        current_chars += len(line) + 1
+        if current_chars >= max_chars:
+            break
+
+    introduction = normalize_space(" ".join(collected))[:max_chars].strip()
+    if len(introduction) < min_chars:
+        return ""
+    return introduction
+
+
+def enrich_introduction_context(papers: list[dict[str, Any]]) -> dict[str, Any]:
+    stats = {
+        "introduction_context_enabled": introduction_context_enabled(),
+        "introduction_attempted": 0,
+        "introduction_succeeded": 0,
+        "introduction_not_found": 0,
+        "introduction_skipped": 0,
+        "introduction_dependency_available": True,
+    }
+
+    if not introduction_context_enabled():
+        stats["introduction_skipped"] = len(papers)
+        return stats
+
+    try:
+        import fitz
+    except ImportError:
+        stats["introduction_dependency_available"] = False
+        stats["introduction_skipped"] = len(papers)
+        print(
+            "Warning: introduction extraction is enabled but PyMuPDF is not installed; "
+            "LLM analysis will use the abstract only.",
+            file=sys.stderr,
+        )
+        return stats
+
+    delay_seconds = max(0.0, env_float("INTRODUCTION_DELAY_SECONDS", 0.5))
+
+    for index, paper in enumerate(papers):
+        if not normalize_space(str(paper.get("pdf_url") or "")):
+            paper["_introduction"] = ""
+            stats["introduction_skipped"] += 1
+            continue
+
+        stats["introduction_attempted"] += 1
+        document = None
+        try:
+            pdf_path = ensure_runtime_pdf(paper)
+            document = fitz.open(str(pdf_path))
+            introduction = extract_introduction_text_from_document(document)
+            paper["_introduction"] = introduction
+
+            if introduction:
+                stats["introduction_succeeded"] += 1
+                print(
+                    f"Extracted introduction context for {paper.get('id')}: "
+                    f"chars={len(introduction)}",
+                    flush=True,
+                )
+            else:
+                stats["introduction_not_found"] += 1
+                print(
+                    f"Introduction not found for {paper.get('id')}; using abstract-only analysis.",
+                    flush=True,
+                )
+        except Exception as exc:
+            paper["_introduction"] = ""
+            stats["introduction_not_found"] += 1
+            print(
+                f"Warning: introduction extraction failed for {paper.get('id')}: {exc}; "
+                "using abstract-only analysis.",
+                file=sys.stderr,
+            )
+        finally:
+            if document is not None:
+                document.close()
+
+        if index + 1 < len(papers) and delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+    return stats
+
+
+def cleanup_runtime_pdf_context(papers: list[dict[str, Any]]) -> None:
+    for paper in papers:
+        paper.pop("_introduction", None)
+        paper.pop("_runtime_pdf_path", None)
+
+    cache_dir = runtime_pdf_cache_dir()
+    if cache_dir.exists():
+        try:
+            shutil.rmtree(cache_dir)
+        except OSError as exc:
+            print(f"Warning: cannot clear runtime PDF cache: {exc}", file=sys.stderr)
+
+
 def figure_caption_score(caption: str, figure_number: int | None = None) -> float:
     text = normalize_space(caption).lower()
     if not text:
@@ -1862,8 +2135,8 @@ def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
         return unavailable
 
     try:
-        pdf_bytes = download_pdf_limited(pdf_url)
-        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pdf_path = ensure_runtime_pdf(paper)
+        document = fitz.open(str(pdf_path))
     except Exception as exc:
         unavailable["reason"] = f"pdf_open_failed: {exc}"
         return unavailable
@@ -2491,6 +2764,12 @@ def call_openai_compatible(prompt: str) -> dict[str, Any]:
 def build_llm_prompt(topic: Topic, paper: dict[str, Any], base_match: dict[str, Any]) -> str:
     abstract_label = "abstract / bibliographic information" if paper.get("source_type") == "conference" else "abstract"
     paper_title = normalize_space(str(paper.get("title") or ""))
+    introduction = normalize_space(str(paper.get("_introduction") or ""))
+    introduction_context = (
+        introduction
+        if introduction
+        else "[Introduction could not be extracted from the available PDF. Use the abstract as the primary paper evidence.]"
+    )
 
     return f"""
 You are analyzing a research paper for a serious personal paper-reading dashboard.
@@ -2499,8 +2778,14 @@ Produce a detailed but disciplined bilingual technical reading note in sentence-
 The English sentence is the primary technical statement; the Chinese sentence must be its faithful, natural translation.
 
 CORE PRINCIPLE:
-Every technical claim MUST be supported by the supplied title, abstract/bibliographic information, categories, or research-interest context.
+Every technical claim MUST be supported by the supplied title, abstract/bibliographic information, extracted Introduction, categories, or research-interest context.
 Do not invent any experiment, dataset, metric, model component, loss function, training strategy, result, or conclusion.
+The Introduction is automatically extracted from the source PDF and may contain minor layout noise such as headers, page numbers, or figure-caption fragments; ignore obvious extraction artifacts.
+
+SOURCE PRIORITY:
+- Use the Abstract and Introduction together as the primary evidence for the paper analysis.
+- Use the Introduction especially to clarify motivation, prior limitations, research gap, high-level technical design, and stated contributions.
+- Do NOT assume details from later Method/Experiment sections unless those details are explicitly stated in the supplied Abstract or Introduction.
 
 SECTION REQUIREMENTS:
 
@@ -2537,8 +2822,8 @@ SECTION REQUIREMENTS:
    - training objective / optimization / supervision, if stated;
    - inference or output stage, if stated.
    Each sentence pair should describe ONE technical step.
-   Preserve exact method names, module names, acronyms, datasets, and task terminology appearing in the abstract.
-   If details are absent, explicitly say they are not reported in the abstract instead of filling them in.
+   Preserve exact method names, module names, acronyms, datasets, and task terminology appearing in the abstract or Introduction.
+   If details are absent, explicitly say they are not reported in the supplied Abstract/Introduction instead of filling them in.
 
 5. innovation
    Prefer 2-4 sentence pairs.
@@ -2595,6 +2880,9 @@ Title: {paper_title}
 Authors: {", ".join(paper.get("authors", [])[:8])}
 Categories: {", ".join(paper.get("categories", []))}
 {abstract_label}: {paper.get("summary", "")}
+
+Introduction (automatically extracted from the source PDF when available):
+{introduction_context}
 
 Base relevance:
 Score: {base_match.get("score")}
@@ -3166,10 +3454,19 @@ def collect(
         reverse=True,
     )
     analyses_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+
+    # Build the same candidate set used for LLM analysis, then enrich those papers
+    # with Introduction text extracted from their source PDFs. If extraction fails,
+    # the existing abstract-only analysis path remains available.
+    llm_candidate_papers = [
+        paper
+        for paper in recent_papers[:max_summaries]
+        if should_summarize_paper_with_llm(paper)
+    ]
+    introduction_stats = enrich_introduction_context(llm_candidate_papers)
+
     llm_jobs = []
-    for paper in recent_papers[:max_summaries]:
-        if not should_summarize_paper_with_llm(paper):
-            continue
+    for paper in llm_candidate_papers:
         best_topic = next(topic for topic in topics if topic.id == paper["best_match"]["topic_id"])
         llm_jobs.append((best_topic, paper))
 
@@ -3208,6 +3505,10 @@ def collect(
     # relevance filtering and LLM analysis, so we do not download PDFs for the
     # entire raw candidate pool.
     model_figure_stats = enrich_model_figures(recent_papers)
+
+    # Introduction text and runtime PDF paths are execution-only context. Do not
+    # persist them into papers.json / conference_papers.json.
+    cleanup_runtime_pdf_context(recent_papers)
 
     daily_recent_papers = [paper for paper in recent_papers if paper.get("source_type") != "conference"]
     conference_recent_papers = [paper for paper in recent_papers if paper.get("source_type") == "conference"]
@@ -3256,6 +3557,7 @@ def collect(
         "cached_conference_candidate_count": cached_conference_candidate_count,
         "clear_cache": clear_cache,
         **conference_enrichment_stats,
+        **introduction_stats,
         **model_figure_stats,
     }
 
