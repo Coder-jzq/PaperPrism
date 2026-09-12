@@ -55,8 +55,12 @@ class Topic:
     id: str
     name: str
     description: str
-    keywords: list[str]
+    search_terms: list[str]
+    context_terms: list[str]
+    require_context_match: bool
     arxiv_categories: list[str]
+    # Backward-compatible alias retained for older configs / web payloads.
+    keywords: list[str]
 
 
 @dataclass(frozen=True)
@@ -123,19 +127,69 @@ def env_int(name: str, default: int) -> int:
 def parse_topics(config: dict[str, Any]) -> list[Topic]:
     topics = []
     for item in config.get("topics", []):
+        if not isinstance(item, dict):
+            continue
         topic_id = item.get("id") or slugify(item.get("name", "topic"))
+        search_terms = [str(term).strip() for term in item.get("search_terms", []) if str(term).strip()]
+        legacy_keywords = [str(term).strip() for term in item.get("keywords", []) if str(term).strip()]
+        if not search_terms:
+            search_terms = legacy_keywords
+        if not search_terms and item.get("name"):
+            search_terms = [str(item["name"])]
+        context_terms = [str(term).strip() for term in item.get("context_terms", []) if str(term).strip()]
         topics.append(
             Topic(
-                id=topic_id,
-                name=item["name"],
-                description=item.get("description", ""),
-                keywords=[str(k) for k in item.get("keywords", [])],
-                arxiv_categories=[str(c) for c in item.get("arxiv_categories", [])],
+                id=str(topic_id),
+                name=str(item["name"]),
+                description=str(item.get("description", "")),
+                search_terms=search_terms,
+                context_terms=context_terms,
+                require_context_match=bool(item.get("require_context_match", False)),
+                arxiv_categories=[str(c).strip() for c in item.get("arxiv_categories", []) if str(c).strip()],
+                keywords=legacy_keywords or list(search_terms),
             )
         )
     if not topics:
         raise ValueError("No topics found in configuration.")
     return topics
+
+
+def parse_retrieval_policy(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("retrieval_policy") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    primary = [
+        str(value).strip()
+        for value in raw.get(
+            "primary_arxiv_categories",
+            ["cs.AI", "cs.CL", "cs.CV", "cs.LG", "cs.MM", "cs.SD", "eess.AS"],
+        )
+        if str(value).strip()
+    ]
+    auxiliary = [
+        str(value).strip()
+        for value in raw.get("auxiliary_arxiv_categories", ["cs.IR", "cs.HC", "cs.RO"])
+        if str(value).strip()
+    ]
+    fields = [str(value).strip().lower() for value in raw.get("arxiv_search_fields", ["title", "abstract"]) if str(value).strip()]
+    fields = [value for value in fields if value in {"title", "abstract"}] or ["title", "abstract"]
+
+    return {
+        "target_domain": str(
+            raw.get(
+                "target_domain",
+                "Artificial Intelligence, Computational Linguistics, Speech, Multimodal Learning and Computer Vision",
+            )
+        ),
+        "description": str(raw.get("description", "")),
+        "primary_arxiv_categories": primary,
+        "auxiliary_arxiv_categories": auxiliary,
+        "require_arxiv_domain_match": bool(raw.get("require_arxiv_domain_match", True)),
+        "arxiv_search_fields": fields,
+        "require_interest_match": bool(raw.get("require_interest_match", True)),
+        "use_context_gate": bool(raw.get("use_context_gate", True)),
+    }
 
 
 def parse_sources(config: dict[str, Any]) -> list[SourceConfig]:
@@ -243,7 +297,10 @@ def default_conference_years(config: dict[str, Any], now: dt.datetime) -> list[i
 
 def parse_conference_sources(config: dict[str, Any], now: dt.datetime) -> list[ConferenceSource]:
     source_config = config.get("conference_sources", {})
-    if not isinstance(source_config, dict) or not source_config.get("enabled", False):
+    if not isinstance(source_config, dict):
+        return []
+    conference_enabled = bool(source_config.get("enabled", bool(source_config.get("venues"))))
+    if not conference_enabled:
         return []
 
     default_years = default_conference_years(source_config, now)
@@ -322,55 +379,77 @@ def load_issue_config(default_config: dict[str, Any]) -> dict[str, Any]:
     return default_config
 
 
-def arxiv_query_for_topic(topic: Topic) -> str:
-    keyword_terms = []
-    for keyword in topic.keywords[:8]:
-        escaped = keyword.replace('"', '\\"')
-        keyword_terms.append(f'all:"{escaped}"')
+def topic_search_terms(topic: Topic, limit: int | None = None) -> list[str]:
+    terms = topic.search_terms or topic.keywords or [topic.name]
+    if limit is None:
+        return list(terms)
+    return list(terms[: max(1, limit)])
 
-    category_terms = [f"cat:{category}" for category in topic.arxiv_categories[:5]]
-    query_mode = os.getenv("ARXIV_QUERY_MODE", "keyword").strip().lower()
-    if query_mode == "keyword":
-        if keyword_terms:
-            return "(" + " OR ".join(keyword_terms) + ")"
-        if category_terms:
-            return "(" + " OR ".join(category_terms) + ")"
-        return f'all:"{topic.name}"'
 
-    if query_mode == "strict":
-        parts = []
-        if keyword_terms:
-            parts.append("(" + " OR ".join(keyword_terms) + ")")
-        if category_terms:
-            parts.append("(" + " OR ".join(category_terms) + ")")
-        return " AND ".join(parts) if parts else f'all:"{topic.name}"'
+def allowed_arxiv_categories(retrieval_policy: dict[str, Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *retrieval_policy.get("primary_arxiv_categories", []),
+                *retrieval_policy.get("auxiliary_arxiv_categories", []),
+            ]
+        )
+    )
 
-    terms = [*keyword_terms, *category_terms]
-    if terms:
-        return "(" + " OR ".join(terms) + ")"
+
+def topic_arxiv_categories(topic: Topic, retrieval_policy: dict[str, Any]) -> list[str]:
+    allowed = set(allowed_arxiv_categories(retrieval_policy))
+    categories = [category for category in topic.arxiv_categories if not allowed or category in allowed]
+    if categories:
+        return categories
+    return [category for category in topic.arxiv_categories]
+
+
+def arxiv_query_for_topic(topic: Topic, retrieval_policy: dict[str, Any]) -> str:
+    search_fields = retrieval_policy.get("arxiv_search_fields", ["title", "abstract"])
+    term_limit = max(1, env_int("ARXIV_SEARCH_TERM_LIMIT", 8))
+    search_clauses: list[str] = []
+    for term in topic_search_terms(topic, term_limit):
+        escaped = normalize_space(term).replace('"', '\\"')
+        if not escaped:
+            continue
+        field_clauses = []
+        if "title" in search_fields:
+            field_clauses.append(f'ti:"{escaped}"')
+        if "abstract" in search_fields:
+            field_clauses.append(f'abs:"{escaped}"')
+        if field_clauses:
+            search_clauses.append("(" + " OR ".join(field_clauses) + ")")
+
+    category_terms = [f"cat:{category}" for category in topic_arxiv_categories(topic, retrieval_policy)]
 
     parts = []
-    if keyword_terms:
-        parts.append("(" + " OR ".join(keyword_terms) + ")")
-    if category_terms:
+    if search_clauses:
+        parts.append("(" + " OR ".join(search_clauses) + ")")
+    if retrieval_policy.get("require_arxiv_domain_match", True) and category_terms:
         parts.append("(" + " OR ".join(category_terms) + ")")
-    return " AND ".join(parts) if parts else f'all:"{topic.name}"'
 
-
-def arxiv_category_query_for_topic(topic: Topic) -> str:
-    category_terms = [f"cat:{category}" for category in topic.arxiv_categories[:5]]
+    if parts:
+        return " AND ".join(parts)
     if category_terms:
         return "(" + " OR ".join(category_terms) + ")"
-    return arxiv_query_for_topic(topic)
+    return f'all:"{normalize_space(topic.name).replace(chr(34), " ")}"'
+
+
+def arxiv_category_query_for_topic(topic: Topic, retrieval_policy: dict[str, Any]) -> str:
+    # Keep this compatibility hook, but preserve the interest terms so an optional
+    # expanded arXiv fetch cannot degrade into a broad category-only crawl.
+    return arxiv_query_for_topic(topic, retrieval_policy)
 
 
 def topic_text_query(topic: Topic, limit: int = 6) -> str:
-    terms = topic.keywords[:limit] or [topic.name]
+    terms = topic_search_terms(topic, limit)
     return " OR ".join(terms)
 
 
-def topic_plain_query(topic: Topic, limit: int = 6) -> str:
-    return " ".join(topic.keywords[:limit]) or topic.name
+def topic_plain_query(topic: Topic, limit: int = 4) -> str:
+    terms = topic_search_terms(topic, limit)
+    return " ".join(terms) or topic.name
 
 
 def html_to_text(value: str) -> str:
@@ -528,10 +607,10 @@ def fetch_arxiv_query(search_query: str, max_results: int, sort_by: str, sort_or
     return parse_arxiv_entries(xml_data)
 
 
-def fetch_arxiv(topic: Topic, max_results: int) -> list[dict[str, Any]]:
+def fetch_arxiv(topic: Topic, max_results: int, retrieval_policy: dict[str, Any]) -> list[dict[str, Any]]:
     sort_by = os.getenv("ARXIV_SORT_BY", "lastUpdatedDate").strip() or "lastUpdatedDate"
     papers = fetch_arxiv_query(
-        arxiv_query_for_topic(topic),
+        arxiv_query_for_topic(topic, retrieval_policy),
         max_results,
         sort_by=sort_by,
         sort_order="descending",
@@ -543,7 +622,7 @@ def fetch_arxiv(topic: Topic, max_results: int) -> list[dict[str, Any]]:
             time.sleep(in_topic_delay)
         category_max_results = max(1, int(os.getenv("ARXIV_CATEGORY_MAX_RESULTS", str(max_results))))
         category_papers = fetch_arxiv_query(
-            arxiv_category_query_for_topic(topic),
+            arxiv_category_query_for_topic(topic, retrieval_policy),
             category_max_results,
             sort_by=sort_by,
             sort_order="descending",
@@ -1323,9 +1402,14 @@ def fetch_feed(source: SourceConfig, max_results: int) -> list[dict[str, Any]]:
     return [paper for paper in papers if paper.get("title")]
 
 
-def fetch_source_topic(source: SourceConfig, topic: Topic, max_results: int) -> list[dict[str, Any]]:
+def fetch_source_topic(
+    source: SourceConfig,
+    topic: Topic,
+    max_results: int,
+    retrieval_policy: dict[str, Any],
+) -> list[dict[str, Any]]:
     if source.type == "arxiv":
-        return fetch_arxiv(topic, max_results)
+        return fetch_arxiv(topic, max_results, retrieval_policy)
     if source.type == "openalex":
         return fetch_openalex(topic, max_results, source)
     if source.type == "crossref":
@@ -1394,63 +1478,171 @@ def collection_cutoff(
     return now - dt.timedelta(days=max(0, days)), "lookback"
 
 
-def keyword_score(topic: Topic, paper: dict[str, Any]) -> tuple[float, list[str]]:
-    haystack = f"{paper.get('title', '')} {paper.get('summary', '')}".lower()
-    hits = []
-    weighted = 0.0
-    for keyword in topic.keywords:
-        normalized = keyword.lower()
-        if normalized in haystack:
-            hits.append(keyword)
-            weighted += min(1.0, max(0.35, len(normalized.split()) / 5))
-    score = min(1.0, weighted / max(2.0, min(5.0, len(topic.keywords) / 2)))
-    return score, hits[:6]
+def normalized_match_text(value: str) -> str:
+    value = html.unescape(str(value or "")).lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return normalize_space(value)
 
 
-def category_score(topic: Topic, paper: dict[str, Any]) -> float:
-    paper_categories = set(paper.get("categories", []))
-    topic_categories = set(topic.arxiv_categories)
-    if not paper_categories or not topic_categories:
-        return 0.0
-    return len(paper_categories & topic_categories) / len(topic_categories)
+def phrase_in_text(phrase: str, text: str) -> bool:
+    needle = normalized_match_text(phrase)
+    haystack = normalized_match_text(text)
+    if not needle or not haystack:
+        return False
+    return f" {needle} " in f" {haystack} "
+
+
+def search_term_score(topic: Topic, paper: dict[str, Any]) -> tuple[float, list[str], list[str]]:
+    title = str(paper.get("title") or "")
+    abstract = str(paper.get("summary") or "")
+    title_hits: list[str] = []
+    abstract_hits: list[str] = []
+
+    for term in topic_search_terms(topic):
+        if phrase_in_text(term, title):
+            title_hits.append(term)
+        elif phrase_in_text(term, abstract):
+            abstract_hits.append(term)
+
+    weighted = 1.0 * len(title_hits) + 0.65 * len(abstract_hits)
+    score = min(1.0, weighted / 2.0)
+    return round(score, 3), title_hits[:8], abstract_hits[:8]
+
+
+def context_term_score(topic: Topic, paper: dict[str, Any]) -> tuple[float, list[str]]:
+    if not topic.context_terms:
+        return 1.0, []
+    haystack = f"{paper.get('title', '')} {paper.get('summary', '')}"
+    hits = [term for term in topic.context_terms if phrase_in_text(term, haystack)]
+    return round(min(1.0, len(hits) / 2.0), 3), hits[:8]
+
+
+def is_arxiv_paper(paper: dict[str, Any]) -> bool:
+    if paper.get("source_type") == "conference":
+        return False
+    source = str(paper.get("source") or "").lower()
+    paper_url = str(paper.get("paper_url") or "").lower()
+    return source == "arxiv" or "arxiv.org" in paper_url
+
+
+def arxiv_domain_gate(
+    topic: Topic,
+    paper: dict[str, Any],
+    retrieval_policy: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    if not is_arxiv_paper(paper) or not retrieval_policy.get("require_arxiv_domain_match", True):
+        return True, []
+
+    paper_categories = set(str(value) for value in paper.get("categories", []))
+    global_allowed = set(allowed_arxiv_categories(retrieval_policy))
+    topic_allowed = set(topic_arxiv_categories(topic, retrieval_policy))
+    global_hits = sorted(paper_categories & global_allowed) if global_allowed else sorted(paper_categories)
+    topic_hits = sorted(paper_categories & topic_allowed) if topic_allowed else global_hits
+    return bool(global_hits and topic_hits), topic_hits
+
+
+def category_score(topic: Topic, paper: dict[str, Any], retrieval_policy: dict[str, Any]) -> tuple[float, list[str]]:
+    if not is_arxiv_paper(paper):
+        return 0.0, []
+    paper_categories = set(str(value) for value in paper.get("categories", []))
+    topic_categories = set(topic_arxiv_categories(topic, retrieval_policy))
+    hits = sorted(paper_categories & topic_categories)
+    if not hits:
+        return 0.0, []
+    return min(1.0, 0.65 + 0.20 * max(0, len(hits) - 1)), hits
 
 
 def lexical_overlap_score(topic: Topic, paper: dict[str, Any]) -> float:
-    topic_terms = set(re.findall(r"[a-zA-Z0-9]+", f"{topic.description} {' '.join(topic.keywords)}".lower()))
+    topic_text = " ".join([topic.description, *topic_search_terms(topic), *topic.context_terms])
+    topic_terms = set(re.findall(r"[a-zA-Z0-9]+", topic_text.lower()))
     paper_terms = set(re.findall(r"[a-zA-Z0-9]+", f"{paper.get('title', '')} {paper.get('summary', '')}".lower()))
+    stop = {
+        "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "by",
+        "model", "models", "learning", "based", "using", "via", "new", "method", "methods",
+    }
+    topic_terms -= stop
+    paper_terms -= stop
     if not topic_terms or not paper_terms:
         return 0.0
     overlap = topic_terms & paper_terms
-    return min(1.0, len(overlap) / max(8, len(topic_terms) * 0.18))
+    return round(min(1.0, len(overlap) / max(6.0, len(topic_terms) * 0.15)), 3)
 
 
 def match_level(score: float) -> str:
-    if score >= 0.72:
+    if score >= 0.68:
         return "high"
     if score >= 0.42:
         return "medium"
     return "low"
 
 
-def score_paper(topic: Topic, paper: dict[str, Any]) -> dict[str, Any]:
-    k_score, hits = keyword_score(topic, paper)
-    c_score = category_score(topic, paper)
-    l_score = lexical_overlap_score(topic, paper)
-    base_score = round(0.50 * k_score + 0.25 * c_score + 0.25 * l_score, 3)
+def score_paper(
+    topic: Topic,
+    paper: dict[str, Any],
+    retrieval_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    retrieval_policy = retrieval_policy or parse_retrieval_policy({})
+    term_score, title_hits, abstract_hits = search_term_score(topic, paper)
+    ctx_score, context_hits = context_term_score(topic, paper)
+    cat_score, category_hits = category_score(topic, paper, retrieval_policy)
+    lexical_score = lexical_overlap_score(topic, paper)
+    domain_pass, domain_hits = arxiv_domain_gate(topic, paper, retrieval_policy)
+
+    interest_gate_pass = (
+        not retrieval_policy.get("require_interest_match", True)
+        or bool(title_hits or abstract_hits)
+    )
+    context_gate_pass = (
+        not retrieval_policy.get("use_context_gate", True)
+        or not topic.require_context_match
+        or bool(context_hits)
+    )
+
+    # Search-term matching carries the most weight. Context and arXiv categories
+    # improve precision, while lexical overlap is only a weak supporting signal.
+    base_score = round(
+        0.55 * term_score
+        + 0.20 * ctx_score
+        + 0.15 * cat_score
+        + 0.10 * lexical_score,
+        3,
+    )
+
     reason_parts = []
-    if hits:
-        reason_parts.append("关键词命中：" + "、".join(hits))
-    if c_score > 0:
-        reason_parts.append("arXiv 分类重合：" + "、".join(sorted(set(topic.arxiv_categories) & set(paper.get("categories", [])))))
+    if title_hits:
+        reason_parts.append("标题检索词命中：" + "、".join(title_hits))
+    if abstract_hits:
+        reason_parts.append("摘要检索词命中：" + "、".join(abstract_hits))
+    if context_hits:
+        reason_parts.append("上下文词命中：" + "、".join(context_hits))
+    if category_hits:
+        reason_parts.append("arXiv 领域命中：" + "、".join(category_hits))
     if not reason_parts:
-        reason_parts.append("文本语义与方向描述存在弱相关，需要人工复核。")
+        reason_parts.append("未发现足够强的标准检索词证据。")
+
     return {
         "topic_id": topic.id,
         "topic_name": topic.name,
         "score": base_score,
+        "deterministic_score": base_score,
         "level": match_level(base_score),
         "reason": "；".join(reason_parts),
-        "keyword_hits": hits,
+        "search_term_hits": list(dict.fromkeys([*title_hits, *abstract_hits])),
+        "title_search_term_hits": title_hits,
+        "abstract_search_term_hits": abstract_hits,
+        "context_hits": context_hits,
+        "arxiv_category_hits": category_hits or domain_hits,
+        "domain_gate_pass": domain_pass,
+        "interest_gate_pass": interest_gate_pass,
+        "context_gate_pass": context_gate_pass,
+        # Legacy field retained for the existing web UI / cached data.
+        "keyword_hits": list(dict.fromkeys([*title_hits, *abstract_hits])),
+        "score_components": {
+            "search_terms": term_score,
+            "context": ctx_score,
+            "category": cat_score,
+            "lexical": lexical_score,
+        },
     }
 
 
@@ -1478,16 +1670,35 @@ def has_meaningful_summary(paper: dict[str, Any], min_chars: int = 80) -> bool:
     return len(summary) >= min_chars
 
 
-def is_relevant_enough(paper: dict[str, Any], best_match: dict[str, Any]) -> bool:
-    if best_match.get("keyword_hits"):
-        return True
+def relevance_rejection_reason(
+    paper: dict[str, Any],
+    best_match: dict[str, Any],
+) -> str:
+    if not best_match.get("domain_gate_pass", True):
+        return "domain"
+    if not best_match.get("interest_gate_pass", True):
+        return "interest"
+    if not best_match.get("context_gate_pass", True):
+        return "context"
 
     score = float(best_match.get("score") or 0.0)
     if paper.get("source_type") == "conference":
-        return score >= env_float("MIN_CONFERENCE_SCORE", 0.18)
-    if not has_meaningful_summary(paper):
-        return score >= env_float("MIN_TITLE_ONLY_SCORE", 0.18)
-    return score >= env_float("MIN_PAPER_SCORE", 0.08)
+        threshold = env_float("MIN_CONFERENCE_SCORE", 0.30)
+    elif not has_meaningful_summary(paper):
+        threshold = env_float("MIN_TITLE_ONLY_SCORE", 0.36)
+    else:
+        threshold = env_float("MIN_PAPER_SCORE", 0.30)
+    return "" if score >= threshold else "score"
+
+
+def is_relevant_enough(
+    paper: dict[str, Any],
+    best_match: dict[str, Any],
+    retrieval_policy: dict[str, Any] | None = None,
+) -> bool:
+    # retrieval_policy is accepted for call-site clarity; the gate outcomes are
+    # already materialized inside best_match by score_paper().
+    return not relevance_rejection_reason(paper, best_match)
 
 
 def enrich_conference_papers_from_arxiv(papers: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2761,6 +2972,190 @@ def call_openai_compatible(prompt: str) -> dict[str, Any]:
         return call_chat_completions_api(prompt, api_key, base_url, model)
 
 
+def relevance_judge_enabled() -> bool:
+    return env_flag("ENABLE_LLM_RELEVANCE_JUDGE", True) and llm_enabled()
+
+
+def build_relevance_judge_prompt(
+    topic: Topic,
+    paper: dict[str, Any],
+    base_match: dict[str, Any],
+    retrieval_policy: dict[str, Any],
+) -> str:
+    return f"""
+You are the strict relevance gate for a personal AI research-paper radar.
+
+Your job is NOT to summarize the paper. Decide whether the paper is genuinely worth keeping for the configured research interest.
+
+STRICT RULES:
+- Keep a paper only when its title/abstract provides direct technical evidence that it matches the research interest.
+- Reject papers that only share a broad field, generic method family, or incidental keyword.
+- For broad topics such as reinforcement learning, graph learning, memory, flow matching, agents, or retrieval, require a direct connection to the configured AI/LLM/speech/multimodal/dialogue/CV context.
+- If evidence is too weak or ambiguous, prefer rejection.
+- Do not infer relevance from author identity, venue prestige, or unsupported assumptions.
+
+Target domain:
+{retrieval_policy.get("target_domain", "")}
+
+Research interest:
+Name: {topic.name}
+Description: {topic.description}
+Search terms: {", ".join(topic.search_terms)}
+Context terms: {", ".join(topic.context_terms)}
+Context match required: {topic.require_context_match}
+
+Candidate paper:
+Title: {paper.get("title", "")}
+Categories: {", ".join(paper.get("categories", []))}
+Abstract / bibliographic information: {paper.get("summary", "")}
+
+Deterministic retrieval evidence:
+Score: {base_match.get("score")}
+Search-term hits: {", ".join(base_match.get("search_term_hits", []))}
+Context hits: {", ".join(base_match.get("context_hits", []))}
+arXiv category hits: {", ".join(base_match.get("arxiv_category_hits", []))}
+
+Return ONLY valid JSON with exactly this structure:
+{{
+  "relevant": true,
+  "relevance_score": 0.0,
+  "confidence": 0.0,
+  "reason": "One concise evidence-based reason in English.",
+  "matched_aspects": ["specific aspect 1", "specific aspect 2"]
+}}
+
+relevance_score is 0..1, where >=0.55 means directly relevant enough to keep.
+confidence is 0..1 and measures confidence in the decision.
+""".strip()
+
+
+def judge_paper_relevance_with_llm(
+    topic: Topic,
+    paper: dict[str, Any],
+    base_match: dict[str, Any],
+    retrieval_policy: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    fail_open = env_flag("RELEVANCE_JUDGE_FAIL_OPEN", True)
+    if not relevance_judge_enabled():
+        updated = dict(base_match)
+        updated["llm_relevance_judge"] = "skipped"
+        updated["llm_relevance_reason"] = "LLM relevance judge is disabled or unavailable; deterministic gates were used."
+        return True, updated
+
+    prompt = build_relevance_judge_prompt(topic, paper, base_match, retrieval_policy)
+    try:
+        data = call_openai_compatible(prompt)
+    except Exception as exc:
+        updated = dict(base_match)
+        updated["llm_relevance_judge"] = "error_fail_open" if fail_open else "error_rejected"
+        updated["llm_relevance_reason"] = f"Relevance judge failed: {exc}"
+        print(f"Warning: LLM relevance judge failed for {paper.get('id')}: {exc}", file=sys.stderr)
+        return fail_open, updated
+
+    relevant_raw = data.get("relevant", False)
+    if isinstance(relevant_raw, str):
+        relevant_flag = relevant_raw.strip().lower() in {"true", "yes", "1", "keep", "relevant"}
+    else:
+        relevant_flag = bool(relevant_raw)
+
+    try:
+        llm_score = max(0.0, min(1.0, float(data.get("relevance_score", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        llm_score = 0.0
+    try:
+        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    threshold = env_float("LLM_RELEVANCE_MIN_SCORE", 0.55)
+    keep = relevant_flag and llm_score >= threshold
+
+    deterministic_score = float(base_match.get("deterministic_score", base_match.get("score", 0.0)) or 0.0)
+    final_score = round(0.55 * deterministic_score + 0.45 * llm_score, 3)
+    updated = dict(base_match)
+    updated["deterministic_score"] = round(deterministic_score, 3)
+    updated["llm_relevance_score"] = round(llm_score, 3)
+    updated["llm_relevance_confidence"] = round(confidence, 3)
+    updated["llm_relevance_judge"] = "keep" if keep else "reject"
+    updated["llm_relevance_reason"] = normalize_space(str(data.get("reason") or ""))
+    updated["llm_matched_aspects"] = [
+        normalize_space(str(value)) for value in ensure_list(data.get("matched_aspects")) if normalize_space(str(value))
+    ][:6]
+    updated["score"] = final_score
+    updated["level"] = match_level(final_score)
+    return keep, updated
+
+
+def relevance_judge_one(
+    args: tuple[Topic, dict[str, Any], dict[str, Any]],
+) -> tuple[str, bool, dict[str, Any]]:
+    topic, paper, retrieval_policy = args
+    keep, updated = judge_paper_relevance_with_llm(topic, paper, paper["best_match"], retrieval_policy)
+    return str(paper.get("id") or paper.get("paper_url") or paper.get("title") or ""), keep, updated
+
+
+def apply_llm_relevance_filter(
+    papers: list[dict[str, Any]],
+    topics: list[Topic],
+    retrieval_policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    stats = {
+        "llm_relevance_judge_enabled": relevance_judge_enabled(),
+        "llm_relevance_judged": 0,
+        "llm_relevance_kept": 0,
+        "llm_relevance_rejected": 0,
+        "llm_relevance_fail_open": 0,
+    }
+    if not papers:
+        return [], stats
+
+    topics_by_id = {topic.id: topic for topic in topics}
+    jobs = []
+    for paper in papers:
+        topic = topics_by_id.get(str((paper.get("best_match") or {}).get("topic_id") or ""))
+        if topic is None:
+            continue
+        jobs.append((topic, paper, retrieval_policy))
+
+    results: dict[str, tuple[bool, dict[str, Any]]] = {}
+    concurrency = max(1, env_int("RELEVANCE_JUDGE_CONCURRENCY", env_int("LLM_CONCURRENCY", 2)))
+    if relevance_judge_enabled() and jobs:
+        print(f"Judging relevance for {len(jobs)} papers with LLM using concurrency={concurrency}", flush=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [executor.submit(relevance_judge_one, job) for job in jobs]
+            for future in concurrent.futures.as_completed(futures):
+                paper_id, keep, updated = future.result()
+                results[paper_id] = (keep, updated)
+    else:
+        for job in jobs:
+            paper_id, keep, updated = relevance_judge_one(job)
+            results[paper_id] = (keep, updated)
+
+    kept: list[dict[str, Any]] = []
+    for paper in papers:
+        paper_id = str(paper.get("id") or paper.get("paper_url") or paper.get("title") or "")
+        result = results.get(paper_id)
+        if result is None:
+            continue
+        keep, updated = result
+        stats["llm_relevance_judged"] += 1
+        if updated.get("llm_relevance_judge") == "error_fail_open":
+            stats["llm_relevance_fail_open"] += 1
+        paper["best_match"] = updated
+        paper["matches"] = [
+            updated if match.get("topic_id") == updated.get("topic_id") else match
+            for match in paper.get("matches", [])
+        ]
+        if keep:
+            kept.append(paper)
+            stats["llm_relevance_kept"] += 1
+        else:
+            stats["llm_relevance_rejected"] += 1
+
+    kept.sort(key=lambda p: (float((p.get("best_match") or {}).get("score") or 0.0), paper_activity_datetime(p)), reverse=True)
+    return kept, stats
+
+
 def build_llm_prompt(topic: Topic, paper: dict[str, Any], base_match: dict[str, Any]) -> str:
     abstract_label = "abstract / bibliographic information" if paper.get("source_type") == "conference" else "abstract"
     paper_title = normalize_space(str(paper.get("title") or ""))
@@ -2774,18 +3169,23 @@ def build_llm_prompt(topic: Topic, paper: dict[str, Any], base_match: dict[str, 
     return f"""
 You are analyzing a research paper for a serious personal paper-reading dashboard.
 
-Produce a detailed but disciplined bilingual technical reading note in sentence-aligned English-Chinese pairs.
+Produce a precise, evidence-grounded bilingual technical reading note in sentence-aligned English-Chinese pairs.
 The English sentence is the primary technical statement; the Chinese sentence must be its faithful, natural translation.
 
-CORE PRINCIPLE:
-Every technical claim MUST be supported by the supplied title, abstract/bibliographic information, extracted Introduction, categories, or research-interest context.
-Do not invent any experiment, dataset, metric, model component, loss function, training strategy, result, or conclusion.
-The Introduction is automatically extracted from the source PDF and may contain minor layout noise such as headers, page numbers, or figure-caption fragments; ignore obvious extraction artifacts.
+QUALITY PRINCIPLE:
+- Prefer fewer specific statements over more generic statements.
+- DO NOT generate content merely to satisfy a requested number of items.
+- Every technical claim MUST be supported by the supplied title, abstract/bibliographic information, extracted Introduction, categories, or research-interest context.
+- Do not invent any experiment, dataset, metric, model component, loss function, training strategy, result, or conclusion.
+- Avoid vague filler such as "the paper proposes a framework" when a more concrete mechanism is available in the supplied evidence.
+- Preserve exact method names, module names, acronyms, datasets, benchmark names, and technical terminology from the supplied source.
+- The Introduction is automatically extracted and may contain minor layout noise; ignore obvious extraction artifacts.
 
 SOURCE PRIORITY:
-- Use the Abstract and Introduction together as the primary evidence for the paper analysis.
-- Use the Introduction especially to clarify motivation, prior limitations, research gap, high-level technical design, and stated contributions.
-- Do NOT assume details from later Method/Experiment sections unless those details are explicitly stated in the supplied Abstract or Introduction.
+- Use Abstract + Introduction together as the primary evidence.
+- Use the Introduction especially for motivation, limitations of prior work, the research gap, high-level technical design, and stated contributions.
+- Use the Abstract especially for the paper's compact task definition, key method summary, and explicit experimental claims.
+- Do NOT assume details from later Method/Experiment sections unless explicitly stated in the supplied Abstract or Introduction.
 
 SECTION REQUIREMENTS:
 
@@ -2794,67 +3194,37 @@ SECTION REQUIREMENTS:
    - title.zh is a faithful Chinese translation.
 
 2. task_intro
-   Explain the research TASK itself before discussing this paper's contribution.
-   Prefer 2-3 sentence pairs:
-   - What research direction/task is being studied?
-   - What is the typical input or observed information?
-   - What output, prediction, generation, retrieval, reasoning result, or optimization objective is expected?
-   - If the abstract does not make input/output explicit, describe only what can be supported and say what remains unspecified.
-   - This section should help a reader unfamiliar with the area understand what the task means.
+   - Usually 1-2 sentence pairs; use 3 only when truly necessary.
+   - Define the task itself: input/observed information, expected output, and objective when supported.
+   - Do not confuse the general task with this paper's specific method.
 
 3. problem
-   Make the problem analysis much clearer than a short abstract paraphrase.
-   Prefer 3-4 sentence pairs that form a logical chain:
-   - What do existing approaches or current practice do?
-   - What limitation, bottleneck, mismatch, or unresolved challenge is identified?
-   - Why is that limitation technically important?
-   - What concrete problem does this paper therefore aim to solve?
-   Do not invent a criticism if the abstract does not state one. Use cautious wording such as
-   "The abstract motivates..." or "The abstract does not specify..." where appropriate.
+   - Usually 2-4 sentence pairs.
+   - Build a compact chain: existing practice -> limitation/gap -> why it matters -> concrete target problem.
+   - If a limitation is not actually stated or implied by the supplied evidence, do not manufacture one.
 
 4. method
-   This should be the most detailed section.
-   Prefer 4-7 sentence pairs and explain the technical pipeline in reading order:
-   - overall framework or main idea;
-   - input representation / encoder / backbone, if stated;
-   - key modules or stages;
-   - how information flows or interacts between modules;
-   - training objective / optimization / supervision, if stated;
-   - inference or output stage, if stated.
-   Each sentence pair should describe ONE technical step.
-   Preserve exact method names, module names, acronyms, datasets, and task terminology appearing in the abstract or Introduction.
-   If details are absent, explicitly say they are not reported in the supplied Abstract/Introduction instead of filling them in.
+   - Use only as many sentence pairs as the evidence supports; typically 2-6.
+   - Explain the technical pipeline in reading order: overall idea, representations/backbones, key modules/stages, interactions/information flow, objectives/supervision, and output/inference when stated.
+   - Each pair should contain one concrete technical step, not generic praise or repetition.
+   - If an important detail is absent, omit it rather than padding the section with repeated "not specified" statements.
 
 5. innovation
-   Prefer 2-4 sentence pairs.
-   Each pair should state ONE distinct innovation or contribution.
-   Explain what is new relative to the limitation/problem described above, not merely repeat the method.
-   Do not call something "first", "novel", "state-of-the-art", or "significant" unless supported by the supplied source.
+   - Usually 1-3 distinct contributions.
+   - State what is technically new relative to the identified problem; do not merely restate the method.
+   - Do not claim "first", "novel", "state-of-the-art", or "significant" unless the supplied source supports it.
 
 6. evidence
-   Prefer 1-3 sentence pairs.
-   Report only evidence explicitly supported by the source:
-   - experiments,
-   - datasets,
-   - benchmarks,
-   - quantitative improvements,
-   - theoretical analysis,
-   - human evaluation,
-   - ablations,
-   - or other validation.
-   Never invent numbers.
+   - Include only explicit evidence from the supplied source: datasets, benchmarks, quantitative results, human evaluation, ablations, theoretical analysis, etc.
+   - Never invent numbers. If the supplied evidence contains no concrete evaluation detail, one short cautious statement is enough.
 
 7. limitations
-   Prefer 1-2 sentence pairs.
-   Distinguish explicit limitations from missing information.
-   When limitations are not stated, use cautious statements such as:
-   "The abstract does not report performance under ..."
-   Do not manufacture weaknesses.
+   - Keep this concise. Distinguish explicit limitations from information that is simply unavailable because later sections were not supplied.
+   - Do not manufacture weaknesses.
 
 8. why_relevant
-   Prefer 1-2 sentence pairs.
-   Explain the connection to the configured research interest.
-   Relevance should be strict and technical rather than generic.
+   - Explain the strict technical connection to the configured research interest in 1-2 sentence pairs.
+   - Do not use generic relevance such as "it uses AI" or "it is related to multimodal learning".
 
 PAIR FORMAT:
 - Every section above except title MUST be an array.
@@ -2864,8 +3234,8 @@ PAIR FORMAT:
 - Do not combine several unrelated claims into one pair.
 
 RELEVANCE:
-- If the paper is only broadly related, lower match_level to medium or low.
-- match_score_adjustment should normally be modest.
+- This paper has already passed a separate strict relevance judge.
+- match_score_adjustment should therefore be modest and evidence-based.
 
 OUTPUT:
 Return ONLY valid JSON. No Markdown. No explanation outside JSON.
@@ -2873,7 +3243,8 @@ Return ONLY valid JSON. No Markdown. No explanation outside JSON.
 Research interest:
 Name: {topic.name}
 Description: {topic.description}
-Keywords: {", ".join(topic.keywords)}
+Search terms: {", ".join(topic.search_terms)}
+Context terms: {", ".join(topic.context_terms)}
 
 Paper:
 Title: {paper_title}
@@ -2888,6 +3259,7 @@ Base relevance:
 Score: {base_match.get("score")}
 Level: {base_match.get("level")}
 Reason: {base_match.get("reason")}
+LLM relevance judge: {base_match.get("llm_relevance_reason", "")}
 
 Return JSON with EXACTLY this structure:
 {{
@@ -3249,6 +3621,7 @@ def collect(
         except OSError as exc:
             print(f"Warning: cannot clear model figure directory: {exc}", file=sys.stderr)
     topics = parse_topics(config)
+    retrieval_policy = parse_retrieval_policy(config)
     sources = parse_sources(config)
     now = dt.datetime.now(dt.timezone.utc)
     conference_sources = parse_conference_sources(config, now)
@@ -3304,7 +3677,7 @@ def collect(
                     time.sleep(source_delay_seconds)
             print(f"Fetching {source.name} papers for topic: {topic.name}", flush=True)
             try:
-                topic_papers = fetch_source_topic(source, topic, max_per_topic)
+                topic_papers = fetch_source_topic(source, topic, max_per_topic, retrieval_policy)
                 all_candidates.extend(topic_papers)
                 successful_fetches += 1
                 source_stats[source.name]["successful_fetches"] += 1
@@ -3378,6 +3751,7 @@ def collect(
     recent_papers = []
     daily_backfill_candidates = []
     filtered_low_relevance = 0
+    deterministic_filter_stats = {"domain": 0, "interest": 0, "context": 0, "score": 0}
     raw_daily_candidate_count = 0
     daily_outside_cutoff_count = 0
     backfill_days = max(days, env_int("DAILY_BACKFILL_DAYS", 14))
@@ -3398,11 +3772,13 @@ def collect(
                 daily_outside_cutoff_count += 1
             continue
 
-        matches = [score_paper(topic, paper) for topic in topics]
+        matches = [score_paper(topic, paper, retrieval_policy) for topic in topics]
         matches.sort(key=lambda item: item["score"], reverse=True)
         best_match = matches[0]
-        if not is_relevant_enough(paper, best_match):
+        rejection_reason = relevance_rejection_reason(paper, best_match)
+        if rejection_reason:
             filtered_low_relevance += 1
+            deterministic_filter_stats[rejection_reason] = deterministic_filter_stats.get(rejection_reason, 0) + 1
             continue
         paper["matches"] = matches
         paper["best_match"] = best_match
@@ -3433,21 +3809,59 @@ def collect(
             existing_daily_ids.add(paper_id)
             daily_recent_papers.append(paper)
             daily_backfill_added_count += 1
-    candidate_paper_count = len(daily_recent_papers) + len(conference_recent_papers)
-    daily_candidate_paper_count = len(daily_recent_papers)
-    conference_candidate_paper_count = len(conference_recent_papers)
+    deterministic_candidate_paper_count = len(daily_recent_papers) + len(conference_recent_papers)
+    deterministic_daily_candidate_count = len(daily_recent_papers)
+    deterministic_conference_candidate_count = len(conference_recent_papers)
+
+    # Keep a wider deterministic pool for the strict LLM relevance judge, then
+    # apply the final MAX_NEW_* limits only after irrelevant papers are removed.
+    judge_multiplier = max(1, env_int("RELEVANCE_JUDGE_CANDIDATE_MULTIPLIER", 2))
+    daily_judge_limit = max_new_papers * judge_multiplier if max_new_papers > 0 else len(daily_recent_papers)
+    conference_judge_limit = (
+        max_new_conference_papers * judge_multiplier
+        if max_new_conference_papers > 0
+        else len(conference_recent_papers)
+    )
+    daily_recent_papers = daily_recent_papers[:daily_judge_limit]
+    conference_recent_papers = conference_recent_papers[:conference_judge_limit]
+
+    # Conference records often start as DBLP title-only entries. Enrich their
+    # abstracts before the LLM relevance judge whenever a trusted source can be found.
+    conference_enrichment_stats = enrich_conference_papers_from_arxiv(conference_recent_papers)
+    if conference_enrichment_stats.get("conference_abstract_enrichment_succeeded"):
+        rescored_conference_papers = []
+        for paper in conference_recent_papers:
+            matches = [score_paper(topic, paper, retrieval_policy) for topic in topics]
+            matches.sort(key=lambda item: item["score"], reverse=True)
+            paper["matches"] = matches
+            paper["best_match"] = matches[0]
+            if is_relevant_enough(paper, matches[0], retrieval_policy):
+                rescored_conference_papers.append(paper)
+        conference_recent_papers = rescored_conference_papers
+        conference_recent_papers.sort(
+            key=lambda p: (p["best_match"]["score"], p.get("published", "")),
+            reverse=True,
+        )
+
+    relevance_judge_input = sorted(
+        [*daily_recent_papers, *conference_recent_papers],
+        key=lambda p: (float((p.get("best_match") or {}).get("score") or 0.0), paper_activity_datetime(p)),
+        reverse=True,
+    )
+    relevance_judged_papers, relevance_judge_stats = apply_llm_relevance_filter(
+        relevance_judge_input, topics, retrieval_policy
+    )
+
+    daily_recent_papers = [paper for paper in relevance_judged_papers if paper.get("source_type") != "conference"]
+    conference_recent_papers = [paper for paper in relevance_judged_papers if paper.get("source_type") == "conference"]
     if max_new_papers > 0:
         daily_recent_papers = daily_recent_papers[:max_new_papers]
     if max_new_conference_papers > 0:
         conference_recent_papers = conference_recent_papers[:max_new_conference_papers]
-    conference_enrichment_stats = enrich_conference_papers_from_arxiv(conference_recent_papers)
-    if conference_enrichment_stats["conference_arxiv_enrichment_succeeded"]:
-        for paper in conference_recent_papers:
-            matches = [score_paper(topic, paper) for topic in topics]
-            matches.sort(key=lambda item: item["score"], reverse=True)
-            paper["matches"] = matches
-            paper["best_match"] = matches[0]
-        conference_recent_papers.sort(key=lambda p: (p["best_match"]["score"], p.get("published", "")), reverse=True)
+
+    candidate_paper_count = len(daily_recent_papers) + len(conference_recent_papers)
+    daily_candidate_paper_count = len(daily_recent_papers)
+    conference_candidate_paper_count = len(conference_recent_papers)
     recent_papers = sorted(
         [*daily_recent_papers, *conference_recent_papers],
         key=lambda p: (p["best_match"]["score"], paper_activity_datetime(p)),
@@ -3536,6 +3950,15 @@ def collect(
         "daily_backfill_added_count": daily_backfill_added_count,
         "min_daily_papers": min_daily_papers,
         "filtered_low_relevance_count": filtered_low_relevance,
+        "filtered_domain_count": deterministic_filter_stats.get("domain", 0),
+        "filtered_interest_count": deterministic_filter_stats.get("interest", 0),
+        "filtered_context_count": deterministic_filter_stats.get("context", 0),
+        "filtered_score_count": deterministic_filter_stats.get("score", 0),
+        "deterministic_candidate_paper_count": deterministic_candidate_paper_count,
+        "deterministic_daily_candidate_count": deterministic_daily_candidate_count,
+        "deterministic_conference_candidate_count": deterministic_conference_candidate_count,
+        "retrieval_policy": retrieval_policy,
+        **relevance_judge_stats,
         "days": days,
         "collection_mode": collection_mode,
         "collection_cutoff_iso": cutoff.isoformat(),
@@ -3622,7 +4045,7 @@ def collect(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect papers and build static data for paper-daily.")
+    parser = argparse.ArgumentParser(description="Collect papers and build static data for PaperPrism.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--conference-output", type=Path, default=Path(os.getenv("CONFERENCE_OUTPUT", str(DEFAULT_CONFERENCE_OUTPUT))))
