@@ -1760,55 +1760,91 @@ def enrich_conference_papers_from_arxiv(papers: list[dict[str, Any]]) -> dict[st
 # =========================================================
 
 FIGURE_CAPTION_RE = re.compile(
-    r"^(?:figure|fig\.?)\s*(\d+[a-z]?)\s*[:.\-–—]?\s*(.*)$",
+    r"^\s*[•·▪◦\-–—]*\s*(?:figure|fig\.?)\s*[:.]?\s*"
+    r"(?P<number>(?:s\s*)?\d+[a-z]?)\s*"
+    r"(?:[:.\-–—|]\s*)?(?P<caption>.*)$",
+    flags=re.I,
+)
+
+TABLE_CAPTION_RE = re.compile(
+    r"^\s*(?:table|tab\.?)\s*[:.]?\s*(?:s\s*)?\d+",
     flags=re.I,
 )
 
 MODEL_FIGURE_POSITIVE_WEIGHTS = {
-    "overall architecture": 3.8,
-    "model architecture": 3.5,
-    "network architecture": 3.3,
-    "system architecture": 3.3,
-    "overall framework": 3.6,
-    "proposed framework": 3.4,
-    "framework overview": 3.2,
-    "overview of the framework": 3.2,
-    "overview of our framework": 3.2,
-    "overall pipeline": 3.2,
-    "method pipeline": 3.0,
-    "proposed method": 2.8,
-    "method overview": 3.0,
-    "model overview": 3.0,
-    "system overview": 2.8,
-    "workflow": 2.4,
+    "overall architecture": 4.2,
+    "architecture overview": 4.0,
+    "model architecture": 3.8,
+    "network architecture": 3.6,
+    "system architecture": 3.6,
+    "overall framework": 4.0,
+    "proposed framework": 3.8,
+    "framework overview": 3.6,
+    "overview of the framework": 3.6,
+    "overview of our framework": 3.6,
+    "overview of the proposed framework": 3.8,
+    "overall pipeline": 3.6,
+    "method pipeline": 3.4,
+    "processing pipeline": 3.0,
+    "training pipeline": 2.6,
+    "inference pipeline": 2.6,
+    "proposed method": 3.0,
+    "proposed approach": 3.0,
+    "method overview": 3.4,
+    "approach overview": 3.2,
+    "model overview": 3.4,
+    "system overview": 3.2,
+    "system diagram": 3.0,
+    "model structure": 3.0,
+    "network structure": 2.8,
+    "schematic": 2.6,
+    "encoder-decoder": 2.5,
+    "end-to-end framework": 3.2,
+    "end to end framework": 3.2,
+    "workflow": 2.5,
     "pipeline": 2.2,
     "framework": 2.0,
-    "architecture": 2.0,
-    "our model": 1.8,
-    "proposed model": 2.4,
+    "architecture": 2.1,
+    "diagram": 1.7,
+    "overview": 1.3,
+    "our model": 1.9,
+    "proposed model": 2.7,
 }
 
 MODEL_FIGURE_NEGATIVE_WEIGHTS = {
-    "ablation": 3.0,
-    "comparison": 2.5,
-    "performance": 2.2,
-    "results": 2.2,
-    "accuracy": 2.0,
-    "distribution": 2.0,
-    "visualization": 1.8,
-    "qualitative": 1.8,
-    "quantitative": 1.8,
-    "confusion matrix": 2.5,
-    "attention map": 2.0,
-    "t-sne": 2.5,
-    "tsne": 2.5,
-    "examples": 1.2,
-    "case study": 1.6,
+    "ablation": 3.2,
+    "comparison": 2.8,
+    "performance": 2.5,
+    "results": 2.4,
+    "accuracy": 2.2,
+    "distribution": 2.2,
+    "visualization": 2.0,
+    "qualitative": 2.0,
+    "quantitative": 2.0,
+    "confusion matrix": 3.0,
+    "attention map": 2.4,
+    "t-sne": 2.8,
+    "tsne": 2.8,
+    "umap": 2.6,
+    "learning curve": 2.6,
+    "roc curve": 2.6,
+    "precision-recall": 2.4,
+    "dataset statistics": 2.8,
+    "data distribution": 2.6,
+    "examples": 1.4,
+    "case study": 1.8,
+    "human evaluation": 2.0,
 }
 
 
 def model_figure_enabled() -> bool:
     return env_flag("ENABLE_MODEL_FIGURE", True)
+
+
+def model_figure_llm_judge_enabled() -> bool:
+    # LLM judging is used only for ambiguous figure candidates. A clearly high-score
+    # architecture caption still takes the cheap deterministic path.
+    return env_flag("ENABLE_LLM_FIGURE_JUDGE", True) and llm_enabled()
 
 
 def model_figure_output_dir() -> Path:
@@ -2148,77 +2184,241 @@ def cleanup_runtime_pdf_context(papers: list[dict[str, Any]]) -> None:
             print(f"Warning: cannot clear runtime PDF cache: {exc}", file=sys.stderr)
 
 
+def _normalized_figure_number(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower().replace("figure", "").replace("fig.", "").replace("fig", "")
+
+
+def _figure_caption_match(text: str) -> re.Match[str] | None:
+    cleaned = normalize_space(text)
+    if not cleaned or TABLE_CAPTION_RE.match(cleaned):
+        return None
+    return FIGURE_CAPTION_RE.match(cleaned)
+
+
 def figure_caption_score(caption: str, figure_number: int | None = None) -> float:
     text = normalize_space(caption).lower()
     if not text:
         return 0.0
 
     raw_score = 0.0
+    positive_hits = 0
+    negative_hits = 0
     for phrase, weight in MODEL_FIGURE_POSITIVE_WEIGHTS.items():
         if phrase in text:
             raw_score += weight
+            positive_hits += 1
 
     for phrase, weight in MODEL_FIGURE_NEGATIVE_WEIGHTS.items():
         if phrase in text:
             raw_score -= weight
+            negative_hits += 1
 
-    # Earlier figures are slightly more likely to be the overall architecture.
-    if figure_number is not None and 1 <= figure_number <= 4:
-        raw_score += max(0.0, 0.45 - 0.08 * (figure_number - 1))
+    # Compositional clues catch captions that do not use one exact phrase from the
+    # dictionary, e.g. "An overview of X showing the encoder and decoder modules".
+    if "overview" in text and any(token in text for token in ("model", "method", "system", "approach", "module")):
+        raw_score += 1.2
+    if any(token in text for token in ("architecture", "framework", "pipeline")) and any(
+        token in text for token in ("proposed", "overall", "our", "model", "method", "system")
+    ):
+        raw_score += 1.0
+    if "encoder" in text and "decoder" in text:
+        raw_score += 0.7
+    if "module" in text and any(token in text for token in ("framework", "architecture", "overview", "pipeline")):
+        raw_score += 0.6
 
-    if 20 <= len(text) <= 800:
-        raw_score += 0.15
+    # Earlier figures are more likely to describe the overall method.
+    if figure_number is not None and 1 <= figure_number <= 5:
+        raw_score += max(0.0, 0.65 - 0.10 * (figure_number - 1))
 
-    # Map the heuristic score to 0..1 for easier configuration.
-    return round(max(0.0, min(1.0, raw_score / 6.0)), 3)
+    if 16 <= len(text) <= 1200:
+        raw_score += 0.18
+
+    # A caption with only negative evidence should stay near zero even if it is early.
+    if negative_hits and not positive_hits:
+        raw_score -= 0.6
+
+    return round(max(0.0, min(1.0, raw_score / 7.0)), 3)
 
 
 def figure_confidence(score: float) -> str:
     if score >= 0.72:
         return "high"
-    if score >= 0.52:
+    if score >= 0.48:
         return "medium"
     return "low"
 
 
-def extract_figure_caption_candidates(document: Any) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
+def _line_records_from_page(page: Any) -> list[dict[str, Any]]:
+    """Reconstruct PDF text lines from words so split caption blocks are still found."""
+    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    try:
+        words = page.get_text("words", sort=True)
+    except TypeError:
+        words = page.get_text("words")
 
-    max_pages = max(1, env_int("MODEL_FIGURE_MAX_PAGES", 12))
+    for word in words:
+        if len(word) < 8:
+            continue
+        x0, y0, x1, y1, token, block_no, line_no, word_no = word[:8]
+        key = (int(block_no), int(line_no))
+        item = grouped.setdefault(
+            key,
+            {
+                "tokens": [],
+                "x0": float(x0),
+                "y0": float(y0),
+                "x1": float(x1),
+                "y1": float(y1),
+                "block_no": int(block_no),
+                "line_no": int(line_no),
+            },
+        )
+        item["tokens"].append((int(word_no), str(token)))
+        item["x0"] = min(float(item["x0"]), float(x0))
+        item["y0"] = min(float(item["y0"]), float(y0))
+        item["x1"] = max(float(item["x1"]), float(x1))
+        item["y1"] = max(float(item["y1"]), float(y1))
+
+    lines: list[dict[str, Any]] = []
+    for item in grouped.values():
+        tokens = [token for _, token in sorted(item.pop("tokens"), key=lambda pair: pair[0])]
+        text = normalize_space(" ".join(tokens))
+        if not text:
+            continue
+        item["text"] = text
+        item["bbox"] = (item.pop("x0"), item.pop("y0"), item.pop("x1"), item.pop("y1"))
+        lines.append(item)
+
+    lines.sort(key=lambda item: (float(item["bbox"][1]), float(item["bbox"][0])))
+    return lines
+
+
+def _merge_caption_lines(lines: list[dict[str, Any]], index: int, base_text: str, base_bbox: tuple[float, float, float, float]) -> tuple[str, tuple[float, float, float, float]]:
+    """Join wrapped caption lines without swallowing a following body paragraph."""
+    try:
+        import fitz
+    except ImportError:
+        return base_text, base_bbox
+
+    merged_text = normalize_space(base_text)
+    merged_rect = fitz.Rect(*base_bbox)
+    base_block = lines[index].get("block_no")
+    max_extra_lines = max(0, env_int("MODEL_FIGURE_CAPTION_EXTRA_LINES", 3))
+    max_gap = max(4.0, env_float("MODEL_FIGURE_CAPTION_LINE_GAP", 18.0))
+
+    for next_item in lines[index + 1 : index + 1 + max_extra_lines]:
+        next_text = normalize_space(str(next_item.get("text") or ""))
+        next_rect = fitz.Rect(*next_item["bbox"])
+        if not next_text:
+            continue
+        if _figure_caption_match(next_text) or TABLE_CAPTION_RE.match(next_text):
+            break
+        if probable_major_section_heading(next_text, None):
+            break
+
+        vertical_gap = next_rect.y0 - merged_rect.y1
+        same_block = next_item.get("block_no") == base_block
+        horizontal_near = horizontal_overlap_ratio(merged_rect, next_rect) >= 0.30 or abs(next_rect.x0 - merged_rect.x0) <= 28
+        if vertical_gap > max_gap or not horizontal_near:
+            break
+        if not same_block and len(merged_text) > 90 and merged_text.endswith((".", ";")):
+            break
+        if len(next_text.split()) > 34 and not same_block:
+            break
+
+        merged_text = normalize_space(f"{merged_text} {next_text}")
+        merged_rect |= next_rect
+        if len(merged_text) >= 1200:
+            break
+
+    return merged_text[:1400], tuple(float(v) for v in merged_rect)
+
+
+def _candidate_from_caption_text(
+    page_index: int,
+    raw_text: str,
+    bbox: tuple[float, float, float, float],
+    source: str,
+) -> dict[str, Any] | None:
+    match = _figure_caption_match(raw_text)
+    if not match:
+        return None
+
+    number_text = normalize_space(match.group("number")).replace(" ", "")
+    caption_tail = normalize_space(match.group("caption") or "")
+    caption = normalize_space(raw_text)
+    if caption_tail and not caption.lower().startswith(("figure", "fig")):
+        caption = f"Figure {number_text}. {caption_tail}"
+
+    numeric_match = re.search(r"\d+", number_text)
+    number_int = int(numeric_match.group(0)) if numeric_match else None
+    score = figure_caption_score(caption, number_int)
+
+    return {
+        "page_index": page_index,
+        "page_number": page_index + 1,
+        "figure_number": f"Figure {number_text}",
+        "figure_key": _normalized_figure_number(number_text),
+        "caption": caption,
+        "bbox": tuple(float(value) for value in bbox),
+        "score": score,
+        "caption_source": source,
+    }
+
+
+def extract_figure_caption_candidates(document: Any) -> list[dict[str, Any]]:
+    """Find figure captions with both block- and line-level PDF text parsing."""
+    candidates_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+
+    max_pages = max(1, env_int("MODEL_FIGURE_MAX_PAGES", 20))
     for page_index in range(min(len(document), max_pages)):
         page = document[page_index]
-        for block in page.get_text("blocks"):
+
+        # Fast path: complete captions commonly live in one text block.
+        try:
+            blocks = page.get_text("blocks", sort=True)
+        except TypeError:
+            blocks = page.get_text("blocks")
+        for block in blocks:
             if len(block) < 5:
                 continue
-
             raw_text = normalize_space(str(block[4] or ""))
-            if not raw_text:
+            candidate = _candidate_from_caption_text(
+                page_index,
+                raw_text,
+                tuple(float(value) for value in block[:4]),
+                "block",
+            )
+            if not candidate:
                 continue
+            key = (page_index, str(candidate["figure_key"]))
+            existing = candidates_by_key.get(key)
+            if not existing or (candidate["score"], len(candidate["caption"])) > (existing["score"], len(existing["caption"])):
+                candidates_by_key[key] = candidate
 
-            match = FIGURE_CAPTION_RE.match(raw_text)
+        # Robust path: reconstruct individual lines. This catches captions split by
+        # PDF layout extraction such as "Figure 2." / "Overall architecture ...".
+        lines = _line_records_from_page(page)
+        for line_index, line in enumerate(lines):
+            line_text = normalize_space(str(line.get("text") or ""))
+            match = _figure_caption_match(line_text)
             if not match:
                 continue
+            merged_text, merged_bbox = _merge_caption_lines(lines, line_index, line_text, line["bbox"])
+            candidate = _candidate_from_caption_text(page_index, merged_text, merged_bbox, "line")
+            if not candidate:
+                continue
+            key = (page_index, str(candidate["figure_key"]))
+            existing = candidates_by_key.get(key)
+            if not existing or (candidate["score"], len(candidate["caption"])) > (existing["score"], len(existing["caption"])):
+                candidates_by_key[key] = candidate
 
-            number_text = match.group(1)
-            numeric_match = re.match(r"\d+", number_text)
-            number_int = int(numeric_match.group(0)) if numeric_match else None
-            score = figure_caption_score(raw_text, number_int)
-
-            candidates.append(
-                {
-                    "page_index": page_index,
-                    "page_number": page_index + 1,
-                    "figure_number": f"Figure {number_text}",
-                    "caption": raw_text,
-                    "bbox": tuple(float(value) for value in block[:4]),
-                    "score": score,
-                }
-            )
-
+    candidates = list(candidates_by_key.values())
     candidates.sort(
         key=lambda item: (
             float(item.get("score") or 0.0),
             -int(item.get("page_index") or 0),
+            -len(str(item.get("caption") or "")),
         ),
         reverse=True,
     )
@@ -2231,6 +2431,56 @@ def horizontal_overlap_ratio(left: Any, right: Any) -> float:
     return overlap / denominator
 
 
+def _graphic_rects_above_caption(page: Any, caption_rect: Any, horizontal_region: Any) -> list[Any]:
+    """Collect raster/vector graphic bounds that plausibly belong to this figure."""
+    import fitz
+
+    rects: list[Any] = []
+    min_area = max(400.0, env_float("MODEL_FIGURE_MIN_GRAPHIC_AREA", 900.0))
+    max_height = min(page.rect.height * 0.60, env_float("MODEL_FIGURE_MAX_HEIGHT_POINTS", 430.0))
+    y_floor = max(page.rect.y0, caption_rect.y0 - max_height)
+
+    # Raster images.
+    try:
+        for image in page.get_images(full=True):
+            xref = image[0]
+            try:
+                image_rects = page.get_image_rects(xref)
+            except Exception:
+                image_rects = []
+            for rect in image_rects:
+                rect = fitz.Rect(rect)
+                if rect.get_area() < min_area:
+                    continue
+                if rect.y1 > caption_rect.y0 + 4 or rect.y0 < y_floor - 12:
+                    continue
+                if horizontal_overlap_ratio(rect, horizontal_region) < 0.18:
+                    continue
+                rects.append(rect)
+    except Exception:
+        pass
+
+    # Vector drawings. Architecture diagrams are often pure PDF vectors rather than
+    # embedded raster images, so this is important for ML/CL/CV papers.
+    try:
+        for drawing in page.get_drawings():
+            rect_value = drawing.get("rect") if isinstance(drawing, dict) else None
+            if rect_value is None:
+                continue
+            rect = fitz.Rect(rect_value)
+            if rect.get_area() < min_area * 0.20:
+                continue
+            if rect.y1 > caption_rect.y0 + 4 or rect.y0 < y_floor - 12:
+                continue
+            if horizontal_overlap_ratio(rect, horizontal_region) < 0.12:
+                continue
+            rects.append(rect)
+    except Exception:
+        pass
+
+    return rects
+
+
 def infer_figure_crop_rect(page: Any, caption_bbox: tuple[float, float, float, float]) -> Any:
     import fitz
 
@@ -2240,7 +2490,7 @@ def infer_figure_crop_rect(page: Any, caption_bbox: tuple[float, float, float, f
     page_height = page_rect.height
 
     full_width_caption = (
-        caption_rect.width >= page_width * 0.58
+        caption_rect.width >= page_width * 0.56
         or (
             caption_rect.x0 <= page_width * 0.18
             and caption_rect.x1 >= page_width * 0.52
@@ -2277,11 +2527,9 @@ def infer_figure_crop_rect(page: Any, caption_bbox: tuple[float, float, float, f
         caption_rect.y0,
     )
 
-    max_lookback = min(page_height * 0.50, env_float("MODEL_FIGURE_MAX_HEIGHT_POINTS", 390.0))
-    crop_y0 = max(page_rect.y0 + 18.0, caption_rect.y0 - max_lookback)
+    max_lookback = min(page_height * 0.56, env_float("MODEL_FIGURE_MAX_HEIGHT_POINTS", 430.0))
+    crop_y0 = max(page_rect.y0 + 15.0, caption_rect.y0 - max_lookback)
 
-    # Find the nearest paragraph-like block above the caption. Long prose blocks
-    # are more likely to be body text than labels embedded inside a diagram.
     nearest_body_bottom = None
     for block in page.get_text("blocks"):
         if len(block) < 5:
@@ -2296,7 +2544,7 @@ def infer_figure_crop_rect(page: Any, caption_bbox: tuple[float, float, float, f
             continue
         if len(block_text) < 110 or len(block_text.split()) < 16:
             continue
-        if FIGURE_CAPTION_RE.match(block_text):
+        if _figure_caption_match(block_text) or TABLE_CAPTION_RE.match(block_text):
             continue
         if horizontal_overlap_ratio(block_rect, target_horizontal) < 0.48:
             continue
@@ -2309,16 +2557,182 @@ def infer_figure_crop_rect(page: Any, caption_bbox: tuple[float, float, float, f
 
     crop_y1 = max(crop_y0 + 1.0, caption_rect.y0 - 4.0)
 
-    # If the inferred region is implausibly short, use a conservative window
-    # directly above the caption.
     min_height = env_float("MODEL_FIGURE_MIN_HEIGHT_POINTS", 72.0)
     if crop_y1 - crop_y0 < min_height:
-        crop_y0 = max(page_rect.y0 + 18.0, caption_rect.y0 - min(250.0, page_height * 0.34))
+        crop_y0 = max(page_rect.y0 + 15.0, caption_rect.y0 - min(280.0, page_height * 0.38))
 
-    return fitz.Rect(crop_x0, crop_y0, crop_x1, crop_y1) & page_rect
+    base_clip = fitz.Rect(crop_x0, crop_y0, crop_x1, crop_y1) & page_rect
+
+    # Refine the crop with detected raster/vector graphics. This recovers diagrams
+    # that extend beyond a column-width caption or whose upper boundary was confused
+    # with nearby prose.
+    graphic_rects = _graphic_rects_above_caption(page, caption_rect, target_horizontal)
+    if graphic_rects:
+        union = fitz.Rect(graphic_rects[0])
+        for rect in graphic_rects[1:]:
+            if rect.y1 < base_clip.y0 - 30 or rect.y0 > caption_rect.y0:
+                continue
+            union |= rect
+
+        # Include short text labels that sit inside / immediately around the graphic
+        # union. Vector diagrams often keep boxes/arrows in get_drawings() but their
+        # labels remain ordinary PDF text spans.
+        label_margin = 24.0
+        for block in page.get_text("blocks"):
+            if len(block) < 5:
+                continue
+            block_rect = fitz.Rect(*block[:4])
+            block_text = normalize_space(str(block[4] or ""))
+            if not block_text or len(block_text) > 140 or len(block_text.split()) > 22:
+                continue
+            if _figure_caption_match(block_text) or TABLE_CAPTION_RE.match(block_text):
+                continue
+            if block_rect.y0 < union.y0 - label_margin or block_rect.y1 > min(caption_rect.y0, union.y1 + label_margin):
+                continue
+            if horizontal_overlap_ratio(block_rect, union) < 0.08 and not (
+                union.x0 - label_margin <= block_rect.x0 <= union.x1 + label_margin
+            ):
+                continue
+            union |= block_rect
+
+        margin = max(6.0, env_float("MODEL_FIGURE_GRAPHIC_MARGIN", 12.0))
+        graphic_clip = fitz.Rect(
+            max(page_rect.x0, union.x0 - margin),
+            max(page_rect.y0, union.y0 - margin),
+            min(page_rect.x1, union.x1 + margin),
+            min(caption_rect.y0 - 3.0, union.y1 + margin),
+        )
+        if graphic_clip.width >= 80 and graphic_clip.height >= 55:
+            # When graphics give us a strong geometric boundary, prefer it over a very
+            # tall prose-derived window. Otherwise union both to retain text labels.
+            if nearest_body_bottom is None or base_clip.height > graphic_clip.height * 1.35:
+                base_clip = graphic_clip & page_rect
+            else:
+                combined = base_clip | graphic_clip
+                if combined.height <= max_lookback + 35 and combined.width <= page_width * 0.98:
+                    base_clip = combined & page_rect
+
+    return base_clip
 
 
-def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
+def build_model_figure_judge_prompt(paper: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+    candidate_lines = []
+    for candidate in candidates:
+        candidate_lines.append(
+            f"- {candidate.get('figure_number')} | page {candidate.get('page_number')} | "
+            f"heuristic={candidate.get('score')} | caption: {candidate.get('caption', '')}"
+        )
+
+    abstract = normalize_space(str(paper.get("summary") or ""))
+    max_abstract_chars = max(500, env_int("MODEL_FIGURE_JUDGE_ABSTRACT_CHARS", 5000))
+    abstract = abstract[:max_abstract_chars]
+
+    return f"""
+You are selecting the MAIN model/framework/architecture figure from a research paper.
+
+Do not summarize the paper. Select only from the supplied candidate figure captions.
+The desired figure is the one that best communicates the paper's proposed model, overall architecture, framework, method pipeline, system design, or end-to-end workflow.
+
+REJECT candidates that are mainly:
+- experimental results, comparison plots, ablations, metrics, confusion matrices, attention maps, visualizations, dataset statistics, examples, or case studies;
+- a small auxiliary illustration that does not represent the main proposed method.
+
+If none of the candidates plausibly represents the paper's main method/framework, return an empty selected_figure.
+Do not invent a figure number that is not listed below.
+
+Paper title:
+{paper.get('title', '')}
+
+Abstract:
+{abstract}
+
+Candidate figures:
+{chr(10).join(candidate_lines)}
+
+Return ONLY valid JSON:
+{{
+  "selected_figure": "Figure 2",
+  "confidence": 0.0,
+  "reason": "One concise evidence-based reason in English."
+}}
+""".strip()
+
+
+def _select_candidate_by_figure_number(candidates: list[dict[str, Any]], value: Any) -> dict[str, Any] | None:
+    key = _normalized_figure_number(str(value or ""))
+    if not key:
+        return None
+    for candidate in candidates:
+        if str(candidate.get("figure_key") or "") == key:
+            return candidate
+        if _normalized_figure_number(str(candidate.get("figure_number") or "")) == key:
+            return candidate
+    return None
+
+
+def select_model_figure_candidate(
+    paper: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    allow_llm_judge: bool = True,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    metadata: dict[str, Any] = {
+        "selection_method": "caption_heuristic",
+        "llm_judge_attempted": False,
+        "llm_confidence": 0.0,
+        "llm_reason": "",
+    }
+    if not candidates:
+        metadata["reason"] = "no_figure_caption_candidate"
+        return None, metadata
+
+    top_k = max(1, env_int("MODEL_FIGURE_LLM_TOP_K", 8))
+    shortlist = candidates[:top_k]
+    best = shortlist[0]
+    best_score = float(best.get("score") or 0.0)
+    direct_score = env_float("MODEL_FIGURE_DIRECT_SCORE", 0.72)
+    fallback_score = env_float("MODEL_FIGURE_MIN_SCORE", 0.28)
+
+    # High-confidence captions do not need an extra LLM call unless explicitly requested.
+    if best_score >= direct_score and not env_flag("MODEL_FIGURE_ALWAYS_LLM_RERANK", False):
+        metadata["selection_method"] = "caption_heuristic_high_confidence"
+        return best, metadata
+
+    if allow_llm_judge and model_figure_llm_judge_enabled():
+        metadata["llm_judge_attempted"] = True
+        try:
+            judged = call_openai_compatible(build_model_figure_judge_prompt(paper, shortlist))
+            selected = _select_candidate_by_figure_number(shortlist, judged.get("selected_figure"))
+            try:
+                confidence = float(judged.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, confidence))
+            metadata["llm_confidence"] = round(confidence, 3)
+            metadata["llm_reason"] = normalize_space(str(judged.get("reason") or ""))
+
+            min_confidence = env_float("MODEL_FIGURE_LLM_MIN_CONFIDENCE", 0.55)
+            if selected is not None and confidence >= min_confidence:
+                metadata["selection_method"] = "caption_llm_judge"
+                return selected, metadata
+            if selected is None and confidence >= min_confidence:
+                metadata["reason"] = "llm_judge_rejected_all_candidates"
+                return None, metadata
+        except Exception as exc:
+            metadata["llm_reason"] = f"LLM figure judge failed: {exc}"
+            print(
+                f"Warning: LLM figure judge failed for {paper.get('id')}: {exc}; using heuristic fallback.",
+                file=sys.stderr,
+            )
+
+    if best_score >= fallback_score:
+        metadata["selection_method"] = "caption_heuristic_fallback"
+        return best, metadata
+
+    metadata.setdefault("reason", "no_architecture_figure_candidate")
+    return None, metadata
+
+
+def extract_model_figure(paper: dict[str, Any], allow_llm_judge: bool = True) -> dict[str, Any]:
     unavailable = {
         "available": False,
         "figure_number": "",
@@ -2328,6 +2742,9 @@ def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
         "confidence": "none",
         "score": 0.0,
         "selection_method": "caption_heuristic",
+        "llm_judge_attempted": False,
+        "llm_confidence": 0.0,
+        "llm_reason": "",
     }
 
     if not model_figure_enabled():
@@ -2354,14 +2771,25 @@ def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
 
     try:
         candidates = extract_figure_caption_candidates(document)
-        min_score = env_float("MODEL_FIGURE_MIN_SCORE", 0.48)
-        candidate = next(
-            (item for item in candidates if float(item.get("score") or 0.0) >= min_score),
-            None,
+        candidate, selection = select_model_figure_candidate(
+            paper,
+            candidates,
+            allow_llm_judge=allow_llm_judge,
         )
+        unavailable.update(selection)
+        unavailable["candidate_count"] = len(candidates)
+        unavailable["candidate_preview"] = [
+            {
+                "figure_number": str(item.get("figure_number") or ""),
+                "page": int(item.get("page_number") or 0),
+                "score": float(item.get("score") or 0.0),
+                "caption": str(item.get("caption") or "")[:320],
+            }
+            for item in candidates[:5]
+        ]
 
         if not candidate:
-            unavailable["reason"] = "no_architecture_figure_candidate"
+            unavailable["reason"] = str(selection.get("reason") or "no_architecture_figure_candidate")
             return unavailable
 
         page = document[int(candidate["page_index"])]
@@ -2386,6 +2814,9 @@ def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
         pixmap.save(str(output_path))
 
         image_rel = f"./data/figures/{filename}"
+        heuristic_score = float(candidate.get("score") or 0.0)
+        llm_confidence = float(selection.get("llm_confidence") or 0.0)
+        display_confidence_score = max(heuristic_score, llm_confidence if selection.get("selection_method") == "caption_llm_judge" else 0.0)
 
         return {
             "available": True,
@@ -2393,9 +2824,13 @@ def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
             "page": int(candidate["page_number"]),
             "image": image_rel,
             "caption": analysis_pair(str(candidate["caption"]), ""),
-            "confidence": figure_confidence(float(candidate["score"])),
-            "score": float(candidate["score"]),
-            "selection_method": "caption_heuristic",
+            "confidence": figure_confidence(display_confidence_score),
+            "score": heuristic_score,
+            "selection_method": str(selection.get("selection_method") or "caption_heuristic"),
+            "llm_judge_attempted": bool(selection.get("llm_judge_attempted")),
+            "llm_confidence": llm_confidence,
+            "llm_reason": str(selection.get("llm_reason") or ""),
+            "candidate_count": len(candidates),
             "source_pdf_url": pdf_url,
         }
     except Exception as exc:
@@ -2403,7 +2838,6 @@ def extract_model_figure(paper: dict[str, Any]) -> dict[str, Any]:
         return unavailable
     finally:
         document.close()
-
 
 def model_figure_file_exists(model_figure: dict[str, Any]) -> bool:
     image = normalize_space(str(model_figure.get("image") or ""))
@@ -2443,8 +2877,12 @@ def enrich_model_figures(papers: list[dict[str, Any]]) -> dict[str, Any]:
         return stats
 
     max_figures = max(0, env_int("MAX_MODEL_FIGURES_PER_RUN", 20))
+    max_llm_judges = max(0, env_int("MAX_MODEL_FIGURE_LLM_JUDGES_PER_RUN", 40))
     delay_seconds = max(0.0, env_float("MODEL_FIGURE_DELAY_SECONDS", 1.0))
     attempts = 0
+    llm_judges = 0
+    stats["model_figure_llm_judge_attempted"] = 0
+    stats["model_figure_llm_selected"] = 0
 
     for paper in papers:
         existing = paper.get("model_figure")
@@ -2467,15 +2905,24 @@ def enrich_model_figures(papers: list[dict[str, Any]]) -> dict[str, Any]:
         attempts += 1
         stats["model_figure_attempted"] += 1
 
-        figure = extract_model_figure(paper)
+        figure = extract_model_figure(
+            paper,
+            allow_llm_judge=llm_judges < max_llm_judges,
+        )
         paper["model_figure"] = figure
+        if figure.get("llm_judge_attempted"):
+            llm_judges += 1
+            stats["model_figure_llm_judge_attempted"] += 1
+        if figure.get("selection_method") == "caption_llm_judge":
+            stats["model_figure_llm_selected"] += 1
 
         if figure.get("available"):
             stats["model_figure_succeeded"] += 1
             print(
                 f"Extracted model figure for {paper.get('id')}: "
                 f"{figure.get('figure_number')} page={figure.get('page')} "
-                f"score={figure.get('score')}",
+                f"score={figure.get('score')} method={figure.get('selection_method')} "
+                f"llm_conf={figure.get('llm_confidence', 0.0)}",
                 flush=True,
             )
         else:
